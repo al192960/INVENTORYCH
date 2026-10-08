@@ -316,10 +316,10 @@ def generar_zpl(modo, material, desc, qty, unidad, bin_):
     fecha = datetime.now().strftime(
         getattr(config, "FORMATO_FECHA", "%d/%m/%Y %H:%M")
     )
-    copias_qr = int(getattr(config, "COPIAS_QR", 2))
+    copias_qr = int(getattr(config, "COPIAS_QR", 1))
     return (
         zpl_etiqueta_qr(modo, m, d, q, u, b, fecha, copias_qr)
-        + zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
+        #+ zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
     )
 # ------------------------------------------------------------------ Android
 def pedir_permisos():
@@ -551,7 +551,7 @@ def desconectar_impresora():
     bluetooth_output = None
     bluetooth_socket = None
     bluetooth_mac_actual = None
-    
+
 def guardar_en_descargas(nombre, texto):
     """Guarda un CSV en la carpeta Descargas. Devuelve la ubicacion donde quedo."""
     datos = texto.encode("utf-8-sig")  # BOM: Excel respeta los acentos
