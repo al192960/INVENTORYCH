@@ -10,7 +10,7 @@ PASSWORD_HASH = "de3d43caad2bd3c4f0622fc60deecd06b34a0f25a80e30b81fe051a3c54799b
 MODO_INICIAL = "BIN"
 
 # Cuantas etiquetas con QR se imprimen por captura (ademas de 1 con codigos de barras)
-COPIAS_QR = 1
+COPIAS_QR = 2
 
 # Formato de la fecha impresa en las etiquetas
 FORMATO_FECHA = "%d/%m/%Y %H:%M"

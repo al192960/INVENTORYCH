@@ -1,5 +1,5 @@
 """
-Etiquetas Zebra ZQ630 (4x2 in, 203 dpi) - Kivy + pyjnius
+Inventory HC - Etiquetas Zebra ZQ630 (4x2 in, 203 dpi) - Kivy + pyjnius
 
 Modos:
   BIN               QR = material TAB um TAB bin TAB qty TAB TAB TAB TAB
@@ -15,14 +15,17 @@ import threading
 from datetime import datetime
 
 from kivy.app import App
-from kivy.clock import mainthread
+from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
+from kivy.graphics import Color, Line, Rectangle, RoundedRectangle
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.image import Image
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
-from kivy.uix.spinner import Spinner
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.textinput import TextInput
 from kivy.utils import platform
 
@@ -51,6 +54,8 @@ class DB:
             "CREATE TABLE IF NOT EXISTS materiales_extra ("
             "material TEXT PRIMARY KEY, descripcion TEXT, unidad TEXT)"
         )
+        # BINs validos (bines.csv)
+        self.con.execute("CREATE TABLE IF NOT EXISTS bines (bin TEXT PRIMARY KEY)")
         self.con.commit()
 
     # --- meta
@@ -129,18 +134,60 @@ class DB:
         )
         self.con.commit()
 
-    def exportar_extra_csv(self):
-        """Materiales agregados desde la app, como texto CSV (o None si no hay)."""
-        filas = self.con.execute(
-            "SELECT material, unidad, descripcion FROM materiales_extra ORDER BY material"
-        ).fetchall()
-        if not filas:
-            return None, 0
-        buf = io.StringIO()
-        w = csv.writer(buf, lineterminator="\r\n")
-        w.writerow(["material", "unidad", "descripcion"])
-        w.writerows(filas)
-        return buf.getvalue(), len(filas)
+    # --- BINs validos (bines.csv)
+    def cargar_bines(self, ruta):
+        """Carga bines.csv empaquetado. Una columna con los BINs validos; el
+        encabezado es opcional (bin, storage bin, ubicacion...). Si el archivo
+        cambio desde la ultima vez, reemplaza la lista."""
+        if not os.path.exists(ruta):
+            return None
+        with open(ruta, "rb") as f:
+            crudo = f.read()
+        huella = hashlib.md5(crudo).hexdigest()
+        if self.get_meta("bines_hash") == huella:
+            return 0
+        for enc in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                texto = crudo.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        primera = texto.splitlines()[0] if texto.strip() else ""
+        delim = max((",", ";", "\t"), key=primera.count)
+        encabezados = {"bin", "bines", "storage bin", "storage_bin", "storagebin",
+                       "ubicacion", "ubicación", "storage location"}
+        filas = list(csv.reader(io.StringIO(texto, newline=""), delimiter=delim))
+        col, inicio = 0, 0
+        if filas:
+            nombres = [c.strip().lower() for c in filas[0]]
+            idx = next((i for i, c in enumerate(nombres) if c in encabezados), None)
+            if idx is not None:
+                col, inicio = idx, 1
+        try:
+            self.con.execute("DELETE FROM bines")
+            n = 0
+            for fila in filas[inicio:]:
+                if len(fila) <= col:
+                    continue
+                b = fila[col].strip().upper()
+                if not b:
+                    continue
+                self.con.execute("INSERT OR IGNORE INTO bines VALUES (?)", (b,))
+                n += 1
+            self.con.commit()
+        except Exception:
+            self.con.rollback()  # conserva la lista anterior
+            raise
+        self.set_meta("bines_hash", huella)
+        return n
+
+    def hay_bines(self):
+        return self.con.execute("SELECT 1 FROM bines LIMIT 1").fetchone() is not None
+
+    def bin_existe(self, b):
+        return self.con.execute(
+            "SELECT 1 FROM bines WHERE bin=?", (b.strip().upper(),)
+        ).fetchone() is not None
 
 
 # ----------------------------------------------------------------------- ZPL
@@ -319,7 +366,7 @@ def generar_zpl(modo, material, desc, qty, unidad, bin_):
     copias_qr = int(getattr(config, "COPIAS_QR", 1))
     return (
         zpl_etiqueta_qr(modo, m, d, q, u, b, fecha, copias_qr)
-        #+ zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
+        + zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
     )
 # ------------------------------------------------------------------ Android
 def pedir_permisos():
@@ -330,8 +377,6 @@ def pedir_permisos():
     request_permissions([
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.BLUETOOTH_SCAN",
-        "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
     ])
 
 
@@ -370,8 +415,6 @@ def pedir_permisos():
     request_permissions([
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.BLUETOOTH_SCAN",
-        "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
     ])
 
 
@@ -552,105 +595,234 @@ def desconectar_impresora():
     bluetooth_socket = None
     bluetooth_mac_actual = None
 
-def guardar_en_descargas(nombre, texto):
-    """Guarda un CSV en la carpeta Descargas. Devuelve la ubicacion donde quedo."""
-    datos = texto.encode("utf-8-sig")  # BOM: Excel respeta los acentos
-
-    if platform != "android":
-        ruta = os.path.join(os.path.expanduser("~"), nombre)
-        with open(ruta, "wb") as f:
-            f.write(datos)
-        return ruta
-
-    from jnius import autoclass
-
-    activity = autoclass("org.kivy.android.PythonActivity").mActivity
-    sdk = autoclass("android.os.Build$VERSION").SDK_INT
-
-    # 1) Android 10+: MediaStore (no necesita permiso de almacenamiento)
-    if sdk >= 29:
-        try:
-            ContentValues = autoclass("android.content.ContentValues")
-            Downloads = autoclass("android.provider.MediaStore$Downloads")
-            v = ContentValues()
-            v.put("_display_name", nombre)
-            v.put("mime_type", "text/csv")
-            v.put("relative_path", "Download")
-            resolver = activity.getContentResolver()
-            uri = resolver.insert(Downloads.EXTERNAL_CONTENT_URI, v)
-            salida = resolver.openOutputStream(uri)
-            salida.write(datos)
-            salida.flush()
-            salida.close()
-            return "Descargas/" + nombre
-        except Exception:
-            pass
-
-    # 2) Android 9 o menor: escritura directa
-    try:
-        ruta = "/sdcard/Download/" + nombre
-        with open(ruta, "wb") as f:
-            f.write(datos)
-        return ruta
-    except Exception:
-        pass
-
-    # 3) Ultimo recurso: carpeta de archivos propia de la app
-    ext = activity.getExternalFilesDir(None).getAbsolutePath()
-    ruta = os.path.join(ext, nombre)
-    with open(ruta, "wb") as f:
-        f.write(datos)
-    return ruta
-
-
 # ------------------------------------------------------------------------ UI
+# Paleta: blanco, amarillo y negro
+NEGRO = (0.055, 0.055, 0.055, 1)
+BLANCO = (1, 1, 1, 1)
+AMARILLO = (1.0, 0.80, 0.0, 1)
+AMARILLO_OSC = (0.88, 0.66, 0.0, 1)
+AMARILLO_CLARO = (1.0, 0.97, 0.80, 1)
+AMARILLO_FOCO = (1.0, 0.92, 0.45, 1)
+GRIS = (0.84, 0.84, 0.84, 1)
+GRIS_TEXTO = (0.48, 0.48, 0.48, 1)
+GRIS_OSC = (0.24, 0.24, 0.24, 1)
+
+DIR_APP = os.path.dirname(os.path.abspath(__file__))
+
+Window.clearcolor = BLANCO
+
+
+def _con_borde(widget, color, ancho, radio=8):
+    """Dibuja un borde redondeado sobre el widget. Devuelve (Color, Line)."""
+    with widget.canvas.after:
+        c = Color(*color)
+        ln = Line(rounded_rectangle=(0, 0, 10, 10, dp(radio)), width=dp(ancho))
+
+    def actualizar(*_):
+        if widget.width < 2 or widget.height < 2:
+            return
+        ln.rounded_rectangle = (widget.x, widget.y, widget.width, widget.height, dp(radio))
+
+    widget.bind(pos=actualizar, size=actualizar)
+    actualizar()
+    return c, ln
+
+
+class Boton(Button):
+    """Boton redondeado: fondo y tinta configurables, gris cuando esta deshabilitado."""
+
+    def __init__(self, texto, fondo=AMARILLO, tinta=NEGRO, **kw):
+        kw.setdefault("font_size", "17sp")
+        super().__init__(
+            text=texto, bold=True, color=tinta, disabled_color=GRIS_TEXTO,
+            background_normal="", background_down="",
+            background_disabled_normal="", background_disabled_down="",
+            background_color=(0, 0, 0, 0), halign="center", **kw
+        )
+        self._fondo = fondo
+        with self.canvas.before:
+            self._c = Color(*fondo)
+            self._r = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(10)])
+        self.bind(pos=self._mover, size=self._mover, state=self._pintar, disabled=self._pintar)
+        self._pintar()
+
+    def _mover(self, *_):
+        self._r.pos = self.pos
+        self._r.size = self.size
+
+    def _pintar(self, *_):
+        if self.disabled:
+            self._c.rgba = GRIS
+        elif self.state == "down":
+            self._c.rgba = tuple(max(0, v * 0.8) for v in self._fondo[:3]) + (1,)
+        else:
+            self._c.rgba = self._fondo
+
+
 class Campo(TextInput):
     def __init__(self, hint, **kw):
         super().__init__(
             hint_text=hint, multiline=False, size_hint_y=None, height=dp(52),
-            font_size="20sp", write_tab=False, **kw
+            font_size="20sp", write_tab=False,
+            background_normal="", background_active="", background_disabled_normal="",
+            background_color=AMARILLO_CLARO, foreground_color=NEGRO,
+            disabled_foreground_color=GRIS_TEXTO, hint_text_color=(0.45, 0.45, 0.45, 1),
+            cursor_color=NEGRO, selection_color=(1, 0.8, 0, 0.45),
+            padding=[dp(12), dp(13), dp(12), dp(8)], **kw
         )
+        self._cb, self._ln = _con_borde(self, NEGRO, 1.3)
+        self.bind(focus=self._estilo, disabled=self._estilo)
+        self._estilo()
+
+    def _estilo(self, *_):
+        if self.disabled:
+            self.background_color = (0.93, 0.93, 0.93, 1)
+            self._cb.rgba, ancho = (0.70, 0.70, 0.70, 1), 1.0
+        elif self.focus:
+            self.background_color = AMARILLO_FOCO
+            self._cb.rgba, ancho = (0.88, 0.62, 0.0, 1), 2.6
+        else:
+            self.background_color = AMARILLO_CLARO
+            self._cb.rgba, ancho = NEGRO, 1.3
+        self._ln.width = dp(ancho)
+
+
+class OpcionSelector(SpinnerOption):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.background_normal = ""
+        self.background_down = ""
+        self.background_color = AMARILLO_CLARO
+        self.color = NEGRO
+        self.font_size = "16sp"
+
+
+class Selector(Spinner):
+    def __init__(self, **kw):
+        super().__init__(
+            background_normal="", background_down="", background_color=AMARILLO_CLARO,
+            color=NEGRO, bold=True, font_size="15sp", option_cls=OpcionSelector, **kw
+        )
+        _con_borde(self, NEGRO, 1.3)
+
+
+class Encabezado(BoxLayout):
+    """Franja negra con el logo y el nombre de la app."""
+
+    def __init__(self, **kw):
+        super().__init__(
+            orientation="horizontal", size_hint_y=None, height=dp(60),
+            padding=[dp(10), dp(6), dp(10), dp(8)], spacing=dp(10), **kw
+        )
+        with self.canvas.before:
+            Color(*NEGRO)
+            self._fondo = Rectangle(pos=self.pos, size=self.size)
+        with self.canvas.after:
+            Color(*AMARILLO)
+            self._linea = Rectangle(pos=self.pos, size=(self.width, dp(4)))
+        self.bind(pos=self._mover, size=self._mover)
+
+        self.add_widget(Image(source=os.path.join(DIR_APP, "icon.png"),
+                              size_hint=(None, 1), width=dp(46)))
+        titulo = Label(text="INVENTORY [color=ffffff]HC[/color]", markup=True, bold=True,
+                       font_size="24sp", color=AMARILLO, halign="left", valign="middle")
+        titulo.bind(size=lambda w, s: setattr(w, "text_size", s))
+        self.add_widget(titulo)
+
+    def _mover(self, *_):
+        self._fondo.pos = self.pos
+        self._fondo.size = self.size
+        self._linea.pos = self.pos
+        self._linea.size = (self.width, dp(4))
+
+
+class BarraEstado(BoxLayout):
+    """Barra negra inferior con el mensaje de estado en amarillo."""
+
+    def __init__(self, **kw):
+        super().__init__(size_hint_y=None, height=dp(56),
+                         padding=[dp(12), dp(6), dp(12), dp(4)], **kw)
+        with self.canvas.before:
+            Color(*NEGRO)
+            self._fondo = Rectangle(pos=self.pos, size=self.size)
+            Color(*AMARILLO)
+            self._linea = Rectangle(pos=(self.x, self.top - dp(3)), size=(self.width, dp(3)))
+        self.bind(pos=self._mover, size=self._mover)
+        self.label = Label(text="Listo", color=AMARILLO, font_size="15sp",
+                           halign="left", valign="middle", max_lines=2)
+        self.label.bind(size=lambda w, s: setattr(w, "text_size", s))
+        self.add_widget(self.label)
+
+    def _mover(self, *_):
+        self._fondo.pos = self.pos
+        self._fondo.size = self.size
+        self._linea.pos = (self.x, self.top - dp(3))
+        self._linea.size = (self.width, dp(3))
+
+
+class PanelAlta(BoxLayout):
+    """Recuadro amarillo para dar de alta un material que no existe."""
+
+    def __init__(self, **kw):
+        super().__init__(orientation="vertical", spacing=dp(6), padding=dp(8), **kw)
+        with self.canvas.before:
+            Color(*AMARILLO)
+            self._fondo = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(12)])
+        self.bind(pos=self._mover, size=self._mover)
+
+    def _mover(self, *_):
+        self._fondo.pos = self.pos
+        self._fondo.size = self.size
 
 
 class Raiz(BoxLayout):
-    ALTO_ALTA = dp(168)
+    ALTO_ALTA = dp(190)
 
     def __init__(self, db, **kw):
-        super().__init__(orientation="vertical", padding=10, spacing=6, **kw)
+        super().__init__(orientation="vertical", spacing=0, padding=0, **kw)
         self.db = db
         self.impresoras = {}
         self.material_ok = False
         modo = db.get_meta("modo", config.MODO_INICIAL)
         self.modo = modo if modo in (MODO_BIN, MODO_SL) else MODO_BIN
 
-        # --- barra superior
-        self.spin = Spinner(text="Selecciona impresora", size_hint_y=None, height=dp(44))
-        fila = BoxLayout(size_hint_y=None, height=dp(40), spacing=6)
-        b_imp = Button(text="Impresoras", font_size="13sp")
-        b_csv = Button(text="Importar CSV", font_size="13sp")
-        b_exp = Button(text="Exportar nuevos", font_size="13sp")
-        b_imp.bind(on_release=lambda *_: self.cargar_impresoras())
-        b_csv.bind(on_release=lambda *_: self.elegir_csv())
-        b_exp.bind(on_release=lambda *_: self.pedir_password(self.exportar))
-        for b in (b_imp, b_csv, b_exp):
-            fila.add_widget(b)
-        self.btn_modo = Button(size_hint_y=None, height=dp(44), bold=True)
+        # --- impresora y modo
+        self.spin = Selector(text="Selecciona impresora")
+        b_act = Boton("Actualizar", fondo=NEGRO, tinta=AMARILLO, font_size="13sp",
+                      size_hint_x=0.3)
+        b_act.bind(on_release=lambda *_: self.cargar_impresoras())
+        fila_imp = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        self.spin.size_hint_x = 0.7
+        fila_imp.add_widget(self.spin)
+        fila_imp.add_widget(b_act)
+
+        self.btn_modo = Boton("", fondo=NEGRO, tinta=AMARILLO, font_size="16sp",
+                              size_hint_y=None, height=dp(46))
         self.btn_modo.bind(on_release=lambda *_: self.cambiar_modo())
 
         # --- captura
         self.f_mat = Campo("Material (escanear)")
-        self.info = Label(text="", size_hint_y=None, height=dp(36))
+        self.info = Label(text="", size_hint_y=None, height=dp(34), color=NEGRO, bold=True,
+                          font_size="16sp", halign="left", valign="middle",
+                          shorten=True, shorten_from="center", max_lines=1)
+        self.info.bind(size=lambda w, s: setattr(w, "text_size", s))
         self.f_uni = Campo("Unidad de medida (PZA, KG, M...)")
-        self.f_desc = Campo("Descripcion (opcional)")
-        self.btn_alta = Button(text="AGREGAR A LA BASE", size_hint_y=None, height=dp(52))
-        self.panel_alta = BoxLayout(orientation="vertical", spacing=6,
-                                    size_hint_y=None, height=0, opacity=0, disabled=True)
+        self.f_desc = Campo("Descripción (opcional)")
+        self.btn_alta = Boton("AGREGAR A LA BASE", fondo=NEGRO, tinta=AMARILLO,
+                              size_hint_y=None, height=dp(52))
+        self.panel_alta = PanelAlta(size_hint_y=None, height=0, opacity=0, disabled=True)
         for w in (self.f_uni, self.f_desc, self.btn_alta):
             self.panel_alta.add_widget(w)
         self.f_qty = Campo("QTY", input_filter="float")
         self.f_bin = Campo("Bin (escanear)")
-        self.btn_print = Button(text="IMPRIMIR", size_hint_y=None, height=dp(60))
-        self.estado = Label(text="Listo")
+
+        # --- imprimir / reimprimir
+        self.btn_print = Boton("IMPRIMIR", font_size="22sp", size_hint_x=0.62)
+        self.btn_reimp = Boton("REIMPRIMIR\nÚLTIMO", fondo=NEGRO, tinta=AMARILLO,
+                               font_size="14sp", size_hint_x=0.38)
+        fila_print = BoxLayout(size_hint_y=None, height=dp(62), spacing=dp(8))
+        fila_print.add_widget(self.btn_print)
+        fila_print.add_widget(self.btn_reimp)
 
         self.f_mat.bind(on_text_validate=self.al_material)
         self.f_mat.bind(text=lambda *_: self.bloquear())  # al cambiar el material, revalidar
@@ -658,15 +830,30 @@ class Raiz(BoxLayout):
         self.f_desc.bind(on_text_validate=self.agregar_material)
         self.btn_alta.bind(on_release=self.agregar_material)
         self.f_qty.bind(on_text_validate=self.al_qty)
-        self.f_bin.bind(on_text_validate=lambda *_: self.imprimir())
+        self.f_bin.bind(on_text_validate=self.al_bin)
         self.btn_print.bind(on_release=lambda *_: self.imprimir())
+        self.btn_reimp.bind(on_release=lambda *_: self.reimprimir())
 
-        for w in (self.spin, fila, self.btn_modo, self.f_mat, self.info,
-                  self.panel_alta, self.f_qty, self.f_bin, self.btn_print, self.estado):
-            self.add_widget(w)
+        # --- armado de la pantalla: encabezado, contenido con scroll, barra de estado
+        contenido = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None,
+                              padding=[dp(12), dp(10), dp(12), dp(10)])
+        contenido.bind(minimum_height=contenido.setter("height"))
+        for w in (fila_imp, self.btn_modo, self.f_mat, self.info, self.panel_alta,
+                  self.f_qty, self.f_bin, fila_print):
+            contenido.add_widget(w)
+        scroll = ScrollView(do_scroll_x=False, bar_width=dp(3), bar_color=AMARILLO_OSC)
+        scroll.add_widget(contenido)
+
+        barra = BarraEstado()
+        self.estado = barra.label
+
+        self.add_widget(Encabezado())
+        self.add_widget(scroll)
+        self.add_widget(barra)
 
         self.aplicar_modo()
         self.bloquear()
+        self.actualizar_reimprimir()
         self.cargar_impresoras()
         self.f_mat.focus = True
 
@@ -696,6 +883,9 @@ class Raiz(BoxLayout):
         self.f_bin.disabled = not (ok and self.modo == MODO_BIN)
         self.btn_print.disabled = not ok
 
+    def actualizar_reimprimir(self):
+        self.btn_reimp.disabled = not self.db.get_meta("ultimo_zpl")
+
     def mostrar_alta(self, visible):
         self.panel_alta.height = self.ALTO_ALTA if visible else 0
         self.panel_alta.opacity = 1 if visible else 0
@@ -711,7 +901,7 @@ class Raiz(BoxLayout):
         self.material_ok = True
         self.aplicar_estado()
 
-    # --- impresoras / CSV
+    # --- impresoras
     def cargar_impresoras(self):
         self.impresoras = impresoras_emparejadas()
         self.spin.values = list(self.impresoras)
@@ -720,38 +910,21 @@ class Raiz(BoxLayout):
             self.spin.text = (zebra or list(self.impresoras))[0]
         self.msg(f"{len(self.impresoras)} impresora(s) emparejada(s)")
 
-    def elegir_csv(self):
-        try:
-            from plyer import filechooser
-            filechooser.open_file(on_selection=self.csv_elegido, filters=["*.csv"])
-        except Exception as e:
-            self.msg(f"No se pudo abrir selector: {e}")
-
-    @mainthread
-    def csv_elegido(self, seleccion):
-        if not seleccion:
-            return
-        try:
-            n = self.db.importar_csv(seleccion[0])
-            self.msg(f"Importados {n} materiales")
-        except Exception as e:
-            self.msg(f"Error CSV: {e}")
-
-    # --- exportar materiales nuevos (con contrasena)
+    # --- contrasena (para dar de alta materiales)
     def pedir_password(self, accion):
-        caja = BoxLayout(orientation="vertical", spacing=8, padding=8)
-        campo = TextInput(password=True, multiline=False, hint_text="Contrasena",
-                          size_hint_y=None, height=dp(48), font_size="18sp")
-        aviso = Label(text="", size_hint_y=None, height=dp(24))
-        botones = BoxLayout(size_hint_y=None, height=dp(48), spacing=8)
-        b_ok = Button(text="Aceptar")
-        b_no = Button(text="Cancelar")
+        caja = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        campo = Campo("Contraseña", password=True)
+        aviso = Label(text="", size_hint_y=None, height=dp(24), color=AMARILLO)
+        botones = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
+        b_ok = Boton("Aceptar")
+        b_no = Boton("Cancelar", fondo=GRIS_OSC, tinta=BLANCO)
         botones.add_widget(b_no)
         botones.add_widget(b_ok)
         for w in (campo, aviso, botones):
             caja.add_widget(w)
-        pop = Popup(title="Contrasena requerida", content=caja,
-                    size_hint=(0.92, None), height=dp(230), auto_dismiss=False)
+        pop = Popup(title="Contraseña requerida", content=caja, title_color=AMARILLO,
+                    separator_color=AMARILLO, background="", background_color=NEGRO,
+                    size_hint=(0.92, None), height=dp(240), auto_dismiss=False)
 
         def verificar(*_):
             huella = hashlib.sha256(campo.text.encode("utf-8")).hexdigest()
@@ -759,26 +932,15 @@ class Raiz(BoxLayout):
                 pop.dismiss()
                 accion()
             else:
-                aviso.text = "Contrasena incorrecta"
+                aviso.text = "Contraseña incorrecta"
                 campo.text = ""
-                campo.focus = True
+                Clock.schedule_once(lambda dt: setattr(campo, "focus", True), 0)
 
         b_ok.bind(on_release=verificar)
         b_no.bind(on_release=lambda *_: pop.dismiss())
         campo.bind(on_text_validate=verificar)
         pop.open()
-        campo.focus = True
-
-    def exportar(self):
-        texto, n = self.db.exportar_extra_csv()
-        if not texto:
-            return self.msg("No hay materiales agregados para exportar")
-        nombre = f"materiales_nuevos_{datetime.now():%Y%m%d_%H%M%S}.csv"
-        try:
-            ubicacion = guardar_en_descargas(nombre, texto)
-            self.msg(f"{n} materiales exportados: {ubicacion}")
-        except Exception as e:
-            self.msg(f"Error al exportar: {e}")
+        Clock.schedule_once(lambda dt: setattr(campo, "focus", True), 0.1)
 
     # --- flujo de captura
     def al_material(self, *_):
@@ -792,7 +954,7 @@ class Raiz(BoxLayout):
             self.desbloquear()
             self.f_qty.focus = True
         else:
-            self.info.text = "NO EXISTE en la base. Captura la unidad y agregalo"
+            self.info.text = "NO EXISTE en la base. Agrégalo abajo"
             self.mostrar_alta(True)
             self.f_uni.focus = True
 
@@ -821,6 +983,26 @@ class Raiz(BoxLayout):
         else:
             self.imprimir()
 
+    # --- validacion de BIN contra bines.csv
+    def bin_valido(self, b):
+        if not self.db.hay_bines():
+            self.msg("La base de BINs está vacía (falta bines.csv). No se imprime.")
+            return False
+        if not self.db.bin_existe(b):
+            self.msg(f"El BIN {b} NO existe. No se imprime.")
+            return False
+        return True
+
+    def al_bin(self, *_):
+        b = self.f_bin.text.strip()
+        if not b:
+            return
+        if not self.bin_valido(b):
+            self.f_bin.text = ""
+            Clock.schedule_once(lambda dt: setattr(self.f_bin, "focus", True), 0)
+            return
+        self.imprimir()
+
     def imprimir(self):
         mat = self.f_mat.text.strip()
         qty = self.f_qty.text.strip()
@@ -833,52 +1015,95 @@ class Raiz(BoxLayout):
                 raise ValueError
         except ValueError:
             return self.msg("Captura una cantidad valida")
-        if self.modo == MODO_BIN and not bin_:
-            return self.msg("Falta el bin")
+        if self.modo == MODO_BIN:
+            if not bin_:
+                return self.msg("Falta el bin")
+            if not self.bin_valido(bin_):
+                return
         mac = self.impresoras.get(self.spin.text)
         if not mac:
             return self.msg("Selecciona una impresora")
 
         desc, unidad = fila
         zpl = generar_zpl(self.modo, mat, desc, qty, unidad, bin_)
+        resumen = f"{mat} | {qty} {unidad}" + (f" | BIN {bin_}" if bin_ else "")
         self.msg("Imprimiendo...")
-        threading.Thread(target=self._enviar, args=(mac, zpl), daemon=True).start()
+        threading.Thread(target=self._enviar, args=(mac, zpl, resumen), daemon=True).start()
 
-    def _enviar(self, mac, zpl):
+    def _enviar(self, mac, zpl, resumen):
         try:
-            enviar_bluetooth(mac, zpl)
-            self.despues_de_imprimir(True, "3 etiquetas enviadas")
+            if not enviar_bluetooth(mac, zpl):
+                raise RuntimeError("no se pudo enviar a la impresora")
+            self.despues_de_imprimir(True, "3 etiquetas enviadas", zpl, resumen)
         except Exception as e:
             self.despues_de_imprimir(False, f"Error: {e}")
 
     @mainthread
-    def despues_de_imprimir(self, ok, texto):
+    def despues_de_imprimir(self, ok, texto, zpl=None, resumen=""):
         self.msg(texto)
         if ok:
+            if zpl:  # guarda la ultima impresion para poder reimprimirla
+                self.db.set_meta("ultimo_zpl", zpl)
+                self.db.set_meta("ultimo_resumen", resumen)
+                self.actualizar_reimprimir()
             self.f_mat.text = self.f_qty.text = self.f_bin.text = ""
             self.bloquear()
             self.f_mat.focus = True
 
+    # --- reimprimir la ultima captura
+    def reimprimir(self):
+        zpl = self.db.get_meta("ultimo_zpl")
+        if not zpl:
+            return self.msg("Aún no hay una etiqueta para reimprimir")
+        mac = self.impresoras.get(self.spin.text)
+        if not mac:
+            return self.msg("Selecciona una impresora")
+        resumen = self.db.get_meta("ultimo_resumen", "")
+        self.msg(f"Reimprimiendo: {resumen}")
+        threading.Thread(target=self._reenviar, args=(mac, zpl, resumen), daemon=True).start()
+
+    def _reenviar(self, mac, zpl, resumen):
+        try:
+            if not enviar_bluetooth(mac, zpl):
+                raise RuntimeError("no se pudo enviar a la impresora")
+            self.fin_reimpresion(f"Reimpresas 3 etiquetas: {resumen}")
+        except Exception as e:
+            self.fin_reimpresion(f"Error: {e}")
+
+    @mainthread
+    def fin_reimpresion(self, texto):
+        self.msg(texto)
+
 
 class EtiquetasApp(App):
+    title = "Inventory HC"
+    icon = os.path.join(DIR_APP, "icon.png")
+
     def build(self):
         pedir_permisos()
         db = DB(os.path.join(self.user_data_dir, "materiales.db"))
-        # materiales.csv va empaquetado junto a main.py dentro del APK (opcional)
-        csv_incluido = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "materiales.csv"
-        )
-        error = None
-        n = None
+        # materiales.csv y bines.csv van empaquetados junto a main.py dentro del APK
+        errores = []
+        n = nb = None
         try:
-            n = db.cargar_incluido(csv_incluido)
+            n = db.cargar_incluido(os.path.join(DIR_APP, "materiales.csv"))
         except Exception as e:
-            error = f"Error al cargar materiales.csv: {e}"
+            errores.append(f"materiales.csv: {e}")
+        try:
+            nb = db.cargar_bines(os.path.join(DIR_APP, "bines.csv"))
+        except Exception as e:
+            errores.append(f"bines.csv: {e}")
         raiz = Raiz(db)
-        if error:
-            raiz.msg(error)
-        elif n:
-            raiz.msg(f"Base cargada: {n} materiales")
+        if errores:
+            raiz.msg("Error al cargar " + " | ".join(errores))
+        else:
+            partes = []
+            if n:
+                partes.append(f"{n} materiales")
+            if nb:
+                partes.append(f"{nb} BINs")
+            if partes:
+                raiz.msg("Base cargada: " + ", ".join(partes))
         return raiz
 
 
