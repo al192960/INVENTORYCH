@@ -27,7 +27,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.textinput import TextInput
-from kivy.utils import platform
+from kivy.utils import escape_markup, platform
 
 import config
 
@@ -35,16 +35,27 @@ Window.softinput_mode = "below_target"
 
 SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 MODO_BIN = "BIN"
-MODO_SL = "STORAGE LOCATION"
+MODO_SL = "SLOC"
 
 
 # ----------------------------------------------------------------- Base de datos
+# Columnas del materiales.csv que marcan un PRODUCTO TERMINADO y valores que cuentan como "si"
+COLUMNAS_TERMINADO = (
+    "producto_terminado", "producto terminado", "terminado", "pt", "fg",
+    "finished_good", "finished good", "tipo", "tipo_material", "tipo material",
+    "material_type", "material type", "mtart",
+)
+VALORES_TERMINADO = {"SI", "SÍ", "S", "X", "1", "TRUE", "VERDADERO", "YES", "Y",
+                     "PT", "FG", "FERT"}
+
+
 class DB:
     def __init__(self, path):
         self.con = sqlite3.connect(path, check_same_thread=False)
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS materiales ("
-            "material TEXT PRIMARY KEY, descripcion TEXT, unidad TEXT)"
+            "material TEXT PRIMARY KEY, descripcion TEXT, unidad TEXT, "
+            "terminado INTEGER DEFAULT 0)"
         )
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS meta (clave TEXT PRIMARY KEY, valor TEXT)"
@@ -52,10 +63,20 @@ class DB:
         # Materiales dados de alta desde la app (no se borran al recargar el CSV)
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS materiales_extra ("
-            "material TEXT PRIMARY KEY, descripcion TEXT, unidad TEXT)"
+            "material TEXT PRIMARY KEY, descripcion TEXT, unidad TEXT, "
+            "terminado INTEGER DEFAULT 0)"
         )
         # BINs validos (bines.csv)
         self.con.execute("CREATE TABLE IF NOT EXISTS bines (bin TEXT PRIMARY KEY)")
+        # Migracion: bases creadas antes de existir la columna 'terminado'
+        for tabla in ("materiales", "materiales_extra"):
+            cols = [r[1] for r in self.con.execute(f"PRAGMA table_info({tabla})")]
+            if "terminado" not in cols:
+                self.con.execute(
+                    f"ALTER TABLE {tabla} ADD COLUMN terminado INTEGER DEFAULT 0"
+                )
+                if tabla == "materiales":  # fuerza a recargar el CSV con la columna nueva
+                    self.con.execute("DELETE FROM meta WHERE clave='csv_hash'")
         self.con.commit()
 
     # --- meta
@@ -108,9 +129,14 @@ class DB:
             r = {(k or "").strip().lower(): (v or "").strip() for k, v in r.items()}
             if not r.get("material"):
                 continue
+            terminado = int(any(
+                (r.get(c, "") or "").strip().upper() in VALORES_TERMINADO
+                for c in COLUMNAS_TERMINADO
+            ))
             self.con.execute(
-                "INSERT OR REPLACE INTO materiales VALUES (?,?,?)",
-                (r["material"], r.get("descripcion", ""), r.get("unidad", "")),
+                "INSERT OR REPLACE INTO materiales "
+                "(material, descripcion, unidad, terminado) VALUES (?,?,?,?)",
+                (r["material"], r.get("descripcion", ""), r.get("unidad", ""), terminado),
             )
             n += 1
         self.con.commit()
@@ -120,7 +146,7 @@ class DB:
         """Devuelve (descripcion, unidad) o None si no existe."""
         for tabla in ("materiales", "materiales_extra"):
             fila = self.con.execute(
-                f"SELECT descripcion, unidad FROM {tabla} WHERE material=?",
+                f"SELECT descripcion, unidad FROM {tabla} WHERE material=? COLLATE NOCASE",
                 (material,),
             ).fetchone()
             if fila:
@@ -129,10 +155,22 @@ class DB:
 
     def agregar(self, material, descripcion, unidad):
         self.con.execute(
-            "INSERT OR REPLACE INTO materiales_extra VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO materiales_extra "
+            "(material, descripcion, unidad, terminado) VALUES (?,?,?,0)",
             (material, descripcion, unidad),
         )
         self.con.commit()
+
+    def es_terminado(self, material):
+        """True si el material esta marcado como producto terminado."""
+        for tabla in ("materiales", "materiales_extra"):
+            fila = self.con.execute(
+                f"SELECT terminado FROM {tabla} WHERE material=? COLLATE NOCASE",
+                (material,),
+            ).fetchone()
+            if fila:
+                return bool(fila[0])
+        return False
 
     # --- BINs validos (bines.csv)
     def cargar_bines(self, ruta):
@@ -595,6 +633,41 @@ def desconectar_impresora():
     bluetooth_socket = None
     bluetooth_mac_actual = None
 
+# ------------------------------------------------------------ Sonido y unidades
+def sonido_error():
+    """Beep de error (material o BIN incorrecto). En Android usa ToneGenerator.
+    El volumen es el de MULTIMEDIA del equipo. Se apaga con SONIDO_ERROR = False."""
+    if not getattr(config, "SONIDO_ERROR", True) or platform != "android":
+        return
+    try:
+        from jnius import autoclass
+
+        ToneGenerator = autoclass("android.media.ToneGenerator")
+        AudioManager = autoclass("android.media.AudioManager")
+        tono = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+        tono.startTone(ToneGenerator.TONE_SUP_ERROR, 900)
+        Clock.schedule_once(lambda dt: tono.release(), 1.5)
+    except Exception as e:
+        print("No se pudo reproducir el sonido:", e)
+
+
+# Unidades que NO requieren aviso (se cuentan por pieza)
+UNIDADES_NORMALES = tuple(
+    str(u).upper() for u in getattr(config, "UNIDADES_NORMALES", ("EA", "PC"))
+)
+
+# Nombre amigable de unidades comunes para el aviso
+NOMBRES_UNIDAD = {
+    "LB": "libras", "FT": "pies", "KG": "kilogramos", "G": "gramos",
+    "M": "metros", "MM": "milímetros", "CM": "centímetros", "IN": "pulgadas",
+    "YD": "yardas", "GAL": "galones", "L": "litros", "ML": "mililitros",
+    "OZ": "onzas", "ROL": "rollos", "BX": "cajas", "BOX": "cajas", "CS": "cajas",
+    "SET": "juegos", "PR": "pares", "DZ": "docenas", "PK": "paquetes",
+    "KIT": "kits", "BG": "bolsas", "DR": "tambores", "M2": "metros cuadrados",
+    "M3": "metros cúbicos", "FT2": "pies cuadrados",
+}
+
+
 # ------------------------------------------------------------------------ UI
 # Paleta: blanco, amarillo y negro
 NEGRO = (0.055, 0.055, 0.055, 1)
@@ -660,7 +733,11 @@ class Boton(Button):
 
 
 class Campo(TextInput):
-    def __init__(self, hint, **kw):
+    """Campo de texto. Todo lo que se captura se convierte a MAYUSCULAS
+    (menos las contrasenas: mayusculas=False)."""
+
+    def __init__(self, hint, mayusculas=True, **kw):
+        self._mayusculas = mayusculas
         super().__init__(
             hint_text=hint, multiline=False, size_hint_y=None, height=dp(52),
             font_size="20sp", write_tab=False,
@@ -673,6 +750,11 @@ class Campo(TextInput):
         self._cb, self._ln = _con_borde(self, NEGRO, 1.3)
         self.bind(focus=self._estilo, disabled=self._estilo)
         self._estilo()
+
+    def insert_text(self, substring, from_undo=False):
+        if getattr(self, "_mayusculas", True):
+            substring = substring.upper()
+        return super().insert_text(substring, from_undo=from_undo)
 
     def _estilo(self, *_):
         if self.disabled:
@@ -783,6 +865,7 @@ class Raiz(BoxLayout):
         self.db = db
         self.impresoras = {}
         self.material_ok = False
+        self._pop_aviso = None  # ventana de aviso abierta (unidad / producto terminado)
         modo = db.get_meta("modo", config.MODO_INICIAL)
         self.modo = modo if modo in (MODO_BIN, MODO_SL) else MODO_BIN
 
@@ -813,24 +896,22 @@ class Raiz(BoxLayout):
         self.panel_alta = PanelAlta(size_hint_y=None, height=0, opacity=0, disabled=True)
         for w in (self.f_uni, self.f_desc, self.btn_alta):
             self.panel_alta.add_widget(w)
-        self.f_qty = Campo("QTY", input_filter="float")
         self.f_bin = Campo("Bin (escanear)")
+        self.f_qty = Campo("QTY", input_filter="float")
+        
 
         # --- imprimir / reimprimir
-        self.btn_print = Boton("IMPRIMIR", font_size="22sp", size_hint_x=0.62)
-        self.btn_reimp = Boton("REIMPRIMIR\nÚLTIMO", fondo=NEGRO, tinta=AMARILLO,
-                               font_size="14sp", size_hint_x=0.38)
-        fila_print = BoxLayout(size_hint_y=None, height=dp(62), spacing=dp(8))
-        fila_print.add_widget(self.btn_print)
-        fila_print.add_widget(self.btn_reimp)
+        self.btn_print = Boton("IMPRIMIR", font_size="22sp", size_hint_y=None, height=dp(62))
+        self.btn_reimp = Boton("REIMPRIMIR ÚLTIMO", fondo=NEGRO, tinta=AMARILLO,
+                               font_size="16sp", size_hint_y=None, height=dp(50))
 
         self.f_mat.bind(on_text_validate=self.al_material)
         self.f_mat.bind(text=lambda *_: self.bloquear())  # al cambiar el material, revalidar
         self.f_uni.bind(on_text_validate=lambda *_: setattr(self.f_desc, "focus", True))
         self.f_desc.bind(on_text_validate=self.agregar_material)
         self.btn_alta.bind(on_release=self.agregar_material)
-        self.f_qty.bind(on_text_validate=self.al_qty)
         self.f_bin.bind(on_text_validate=self.al_bin)
+        self.f_qty.bind(on_text_validate=self.al_qty)
         self.btn_print.bind(on_release=lambda *_: self.imprimir())
         self.btn_reimp.bind(on_release=lambda *_: self.reimprimir())
 
@@ -839,7 +920,7 @@ class Raiz(BoxLayout):
                               padding=[dp(12), dp(10), dp(12), dp(10)])
         contenido.bind(minimum_height=contenido.setter("height"))
         for w in (fila_imp, self.btn_modo, self.f_mat, self.info, self.panel_alta,
-                  self.f_qty, self.f_bin, fila_print):
+                  self.f_bin, self.f_qty, self.btn_print, self.btn_reimp):
             contenido.add_widget(w)
         scroll = ScrollView(do_scroll_x=False, bar_width=dp(3), bar_color=AMARILLO_OSC)
         scroll.add_widget(contenido)
@@ -913,7 +994,7 @@ class Raiz(BoxLayout):
     # --- contrasena (para dar de alta materiales)
     def pedir_password(self, accion):
         caja = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
-        campo = Campo("Contraseña", password=True)
+        campo = Campo("Contraseña", password=True, mayusculas=False)
         aviso = Label(text="", size_hint_y=None, height=dp(24), color=AMARILLO)
         botones = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
         b_ok = Boton("Aceptar")
@@ -948,15 +1029,93 @@ class Raiz(BoxLayout):
         if not mat:
             return
         fila = self.db.buscar(mat)
-        if fila:
-            self.mostrar_alta(False)
-            self.info.text = f"{fila[0]}  [{fila[1]}]"
-            self.desbloquear()
-            self.f_qty.focus = True
-        else:
+        if not fila:
             self.info.text = "NO EXISTE en la base. Agrégalo abajo"
             self.mostrar_alta(True)
+            sonido_error()
             self.f_uni.focus = True
+            return
+        self.mostrar_alta(False)
+        self.info.text = f"{fila[0]}  [{fila[1]}]"
+        # Avisos que hay que aceptar antes de continuar (en este orden)
+        pasos = []
+        unidad = (fila[1] or "").strip().upper()
+        if unidad and unidad not in UNIDADES_NORMALES:
+            pasos.append(lambda sig: self.confirmar_unidad(unidad, sig))
+        if self.modo == MODO_SL and self.db.es_terminado(mat):
+            pasos.append(self.confirmar_terminado)
+        self._ejecutar_pasos(pasos)
+
+    def _ejecutar_pasos(self, pasos):
+        """Muestra los avisos uno tras otro; al aceptar el ultimo se habilita la captura."""
+        if not pasos:
+            self._continuar_material()
+            return
+        pasos[0](lambda: self._ejecutar_pasos(pasos[1:]))
+
+    def _continuar_material(self):
+        """Material valido: se habilita la captura. Primero BIN y luego QTY."""
+        self.desbloquear()
+        if self.modo == MODO_BIN:
+            self.f_bin.focus = True
+        else:
+            self.f_qty.focus = True
+
+    def _aviso(self, titulo, cuerpo, siguiente, alto=330):
+        """Ventana de aviso con ACEPTAR / Cancelar. Cancelar limpia el material."""
+        if getattr(self, "_pop_aviso", None) is not None:
+            return  # ya hay un aviso abierto
+        for w in (self.f_mat, self.f_bin, self.f_qty):
+            w.focus = False
+        texto = Label(text=cuerpo, markup=True, halign="center", valign="middle",
+                      color=BLANCO, font_size="17sp")
+        texto.bind(size=lambda w, sz: setattr(w, "text_size", sz))
+        b_no = Boton("Cancelar", fondo=GRIS_OSC, tinta=BLANCO)
+        b_ok = Boton("ACEPTAR")
+        botones = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(8))
+        botones.add_widget(b_no)
+        botones.add_widget(b_ok)
+        caja = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
+        caja.add_widget(texto)
+        caja.add_widget(botones)
+        pop = Popup(title=titulo, content=caja, title_color=AMARILLO,
+                    separator_color=AMARILLO, background="", background_color=NEGRO,
+                    size_hint=(0.92, None), height=dp(alto), auto_dismiss=False)
+        pop._b_ok, pop._b_no = b_ok, b_no
+        self._pop_aviso = pop
+
+        def cerrar():
+            pop.dismiss()
+            self._pop_aviso = None
+
+        def aceptar(*_):
+            cerrar()
+            Clock.schedule_once(lambda dt: siguiente(), 0)
+
+        def cancelar(*_):
+            cerrar()
+            self.f_mat.text = ""  # vuelve a bloquear la captura
+            Clock.schedule_once(lambda dt: setattr(self.f_mat, "focus", True), 0)
+
+        b_ok.bind(on_release=aceptar)
+        b_no.bind(on_release=cancelar)
+        pop.open()
+
+    def confirmar_unidad(self, unidad, siguiente):
+        """Aviso: el material se cuenta por LB, FT, etc. (no por EA/PC)."""
+        nombre = NOMBRES_UNIDAD.get(unidad)
+        detalle = f"({escape_markup(nombre)})\n" if nombre else ""
+        um = escape_markup(unidad)
+        cuerpo = (f"ESTE MATERIAL SE CUENTA POR\n"
+                  f"[color=ffcc00][size=52sp][b]{um}[/b][/size][/color]\n{detalle}"
+                  f"Captura la cantidad en {um}.")
+        self._aviso("Unidad de medida diferente", cuerpo, siguiente)
+
+    def confirmar_terminado(self, siguiente):
+        """Aviso (modo SLOC): producto terminado, revisar componentes por explosionar."""
+        cuerpo = ("[color=ffcc00][size=30sp][b]PRODUCTO TERMINADO[/b][/size][/color]\n\n"
+                  "Verificar si los componentes están\npendientes de explosionar.")
+        self._aviso("Verificar componentes", cuerpo, siguiente, alto=300)
 
     def agregar_material(self, *_):
         """Valida los datos y pide contrasena antes de guardar."""
@@ -969,27 +1128,25 @@ class Raiz(BoxLayout):
         self.pedir_password(self._guardar_material)
 
     def _guardar_material(self):
-        mat = self.f_mat.text.strip()
+        mat = self.f_mat.text.strip().upper()
         uni = self.f_uni.text.strip().upper()
-        desc = self.f_desc.text.strip()
+        desc = self.f_desc.text.strip().upper()
         self.db.agregar(mat, desc, uni)
         self.msg(f"Material {mat} agregado a la base")
         self.f_uni.text = self.f_desc.text = ""
         self.al_material()  # ya existe: desbloquea y sigue a cantidad
 
-    def al_qty(self, *_):
-        if self.modo == MODO_BIN:
-            self.f_bin.focus = True
-        else:
-            self.imprimir()
+
 
     # --- validacion de BIN contra bines.csv
     def bin_valido(self, b):
         if not self.db.hay_bines():
             self.msg("La base de BINs está vacía (falta bines.csv). No se imprime.")
+            sonido_error()
             return False
         if not self.db.bin_existe(b):
             self.msg(f"El BIN {b} NO existe. No se imprime.")
+            sonido_error()
             return False
         return True
 
@@ -1001,20 +1158,17 @@ class Raiz(BoxLayout):
             self.f_bin.text = ""
             Clock.schedule_once(lambda dt: setattr(self.f_bin, "focus", True), 0)
             return
+        self.f_qty.focus = True  # BIN correcto: sigue la cantidad
+
+    def al_qty(self, *_):
         self.imprimir()
 
     def imprimir(self):
-        mat = self.f_mat.text.strip()
+        mat = self.f_mat.text.strip().upper()
+        bin_ = self.f_bin.text.strip().upper() if self.modo == MODO_BIN else ""
         qty = self.f_qty.text.strip()
-        bin_ = self.f_bin.text.strip() if self.modo == MODO_BIN else ""
         fila = self.db.buscar(mat) if mat else None
-        if not fila:
-            return self.msg("Material no existe en la base")
-        try:
-            if float(qty) <= 0:
-                raise ValueError
-        except ValueError:
-            return self.msg("Captura una cantidad valida")
+
         if self.modo == MODO_BIN:
             if not bin_:
                 return self.msg("Falta el bin")
@@ -1023,10 +1177,20 @@ class Raiz(BoxLayout):
         mac = self.impresoras.get(self.spin.text)
         if not mac:
             return self.msg("Selecciona una impresora")
+        if not fila:
+            sonido_error()
+            return self.msg("Material no existe en la base")
+        try:
+            if float(qty) <= 0:
+                raise ValueError
+        except ValueError:
+            return self.msg("Captura una cantidad valida")
 
         desc, unidad = fila
         zpl = generar_zpl(self.modo, mat, desc, qty, unidad, bin_)
-        resumen = f"{mat} | {qty} {unidad}" + (f" | BIN {bin_}" if bin_ else "")
+        resumen = " | ".join(
+            [mat] + ([f"BIN {bin_}"] if bin_ else []) + [f"QTY {qty} {unidad}"]
+        )
         self.msg("Imprimiendo...")
         threading.Thread(target=self._enviar, args=(mac, zpl, resumen), daemon=True).start()
 
