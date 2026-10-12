@@ -865,28 +865,7 @@ class PantallaCarga(FloatLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        fondo = os.path.join(DIR_APP, "fondo_almacen.png")
-
-        # Fondo del almacén
-        if os.path.exists(fondo):
-            imagen = Image(
-                source=fondo,
-                allow_stretch=True,
-                keep_ratio=False,
-                size_hint=(1, 1),
-                pos_hint={"x": 0, "y": 0}
-            )
-            self.add_widget(imagen)
-
-        else:
-            with self.canvas.before:
-                Color(*NEGRO)
-                self._fondo = Rectangle(
-                    pos=self.pos,
-                    size=self.size
-                )
-            self.bind(pos=self._actualizar_fondo,
-                      size=self._actualizar_fondo)
+        
 
         # Contenido de la pantalla
         panel = BoxLayout(
@@ -1320,8 +1299,7 @@ class Raiz(BoxLayout):
             self.bloquear()
             self.f_mat.focus = True
 
-    # --- reimprimir la ultima captura
-    
+
     # --- reimprimir la ultima captura
     def reimprimir(self):
         zpl = self.db.get_meta("ultimo_zpl")
