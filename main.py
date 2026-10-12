@@ -645,8 +645,8 @@ def sonido_error():
         ToneGenerator = autoclass("android.media.ToneGenerator")
         AudioManager = autoclass("android.media.AudioManager")
         tono = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
-        tono.startTone(ToneGenerator.TONE_CDMA_ABBR_REORDER, 900)
-        Clock.schedule_once(lambda dt: tono.release(), 1.5)
+        tono.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 900)
+        Clock.schedule_once(lambda dt: tono.release(), 2)
     except Exception as e:
         print("No se pudo reproducir el sonido:", e)
 
@@ -1114,7 +1114,7 @@ class Raiz(BoxLayout):
     def confirmar_terminado(self, siguiente):
         """Aviso (modo SLOC): producto terminado, revisar componentes por explosionar."""
         cuerpo = ("[color=ffcc00][size=30sp][b]PRODUCTO TERMINADO[/b][/size][/color]\n\n"
-                  "Validar si el material \n ya fue capturado en sap.")
+                  "Validar si el material \n ya fue capturado en SAP.")
         self._aviso("Verificar componentes", cuerpo, siguiente, alto=300)
 
     def agregar_material(self, *_):
