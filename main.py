@@ -43,9 +43,9 @@ MODO_SL = "SLOC"
 COLUMNAS_TERMINADO = (
     "producto_terminado", "producto terminado", "terminado", "pt", "fg",
     "finished_good", "finished good", "tipo", "tipo_material", "tipo material",
-    "material_type", "material type", "mtart",
+    "material_type", "Material Type", "mtart",
 )
-VALORES_TERMINADO = {"SI", "SÍ", "S", "X", "1", "TRUE", "VERDADERO", "YES", "Y",
+VALORES_TERMINADO = {"SI", "SÍ", "ZFIN", "X", "1", "TRUE", "VERDADERO", "YES", "Y",
                      "PT", "FG", "FERT"}
 
 
@@ -645,7 +645,7 @@ def sonido_error():
         ToneGenerator = autoclass("android.media.ToneGenerator")
         AudioManager = autoclass("android.media.AudioManager")
         tono = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
-        tono.startTone(ToneGenerator.TONE_SUP_ERROR, 900)
+        tono.startTone(ToneGenerator.TONE_CDMA_ABBR_REORDER, 900)
         Clock.schedule_once(lambda dt: tono.release(), 1.5)
     except Exception as e:
         print("No se pudo reproducir el sonido:", e)
@@ -1114,7 +1114,7 @@ class Raiz(BoxLayout):
     def confirmar_terminado(self, siguiente):
         """Aviso (modo SLOC): producto terminado, revisar componentes por explosionar."""
         cuerpo = ("[color=ffcc00][size=30sp][b]PRODUCTO TERMINADO[/b][/size][/color]\n\n"
-                  "Verificar si los componentes están\npendientes de explosionar.")
+                  "Validar si el material \n ya fue capturado en sap.")
         self._aviso("Verificar componentes", cuerpo, siguiente, alto=300)
 
     def agregar_material(self, *_):
