@@ -28,6 +28,8 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.textinput import TextInput
 from kivy.utils import escape_markup, platform
+from kivy.uix.progressbar import ProgressBar
+from kivy.uix.floatlayout import FloatLayout
 
 import config
 
@@ -857,6 +859,110 @@ class PanelAlta(BoxLayout):
         self._fondo.size = self.size
 
 
+class PantallaCarga(FloatLayout):
+    """Pantalla interna de carga de Inventory HC."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        fondo = os.path.join(DIR_APP, "fondo_almacen.png")
+
+        # Fondo del almacén
+        if os.path.exists(fondo):
+            imagen = Image(
+                source=fondo,
+                allow_stretch=True,
+                keep_ratio=False,
+                size_hint=(1, 1),
+                pos_hint={"x": 0, "y": 0}
+            )
+            self.add_widget(imagen)
+
+        else:
+            with self.canvas.before:
+                Color(*NEGRO)
+                self._fondo = Rectangle(
+                    pos=self.pos,
+                    size=self.size
+                )
+            self.bind(pos=self._actualizar_fondo,
+                      size=self._actualizar_fondo)
+
+        # Contenido de la pantalla
+        panel = BoxLayout(
+            orientation="vertical",
+            spacing=dp(18),
+            padding=[dp(24), dp(24)],
+            size_hint=(0.92, 0.48),
+            pos_hint={"center_x": 0.5, "center_y": 0.5}
+        )
+
+        # Panel oscuro semitransparente
+        with panel.canvas.before:
+            Color(0.03, 0.03, 0.03, 0.88)
+            panel.fondo_panel = RoundedRectangle(
+                pos=panel.pos,
+                size=panel.size,
+                radius=[dp(18)]
+            )
+
+        def actualizar_panel(*_):
+            panel.fondo_panel.pos = panel.pos
+            panel.fondo_panel.size = panel.size
+
+        panel.bind(pos=actualizar_panel, size=actualizar_panel)
+
+        logo = os.path.join(DIR_APP, "icon.png")
+        if os.path.exists(logo):
+            panel.add_widget(Image(
+                source=logo,
+                size_hint=(1, 0.55),
+                fit_mode="contain"
+            ))
+
+        titulo = Label(
+            text="[b]INVENTORY HC[/b]",
+            markup=True,
+            color=AMARILLO,
+            font_size="25sp",
+            size_hint=(1, 0.20)
+        )
+        panel.add_widget(titulo)
+
+        self.estado = Label(
+            text="Iniciando aplicación...",
+            color=BLANCO,
+            font_size="15sp",
+            size_hint=(1, 0.20)
+        )
+        panel.add_widget(self.estado)
+
+        self.barra = ProgressBar(
+            max=100,
+            value=0,
+            size_hint=(1, None),
+            height=dp(14)
+        )
+        panel.add_widget(self.barra)
+
+        self.porcentaje = Label(
+            text="0 %",
+            color=AMARILLO,
+            font_size="14sp",
+            size_hint=(1, 0.15)
+        )
+        panel.add_widget(self.porcentaje)
+
+        self.add_widget(panel)
+
+    def _actualizar_fondo(self, *_):
+        self._fondo.pos = self.pos
+        self._fondo.size = self.size
+
+    def actualizar(self, valor, mensaje):
+        self.barra.value = valor
+        self.estado.text = mensaje
+        self.porcentaje.text = f"{int(valor)} %"
 class Raiz(BoxLayout):
     ALTO_ALTA = dp(190)
 
@@ -1215,16 +1321,93 @@ class Raiz(BoxLayout):
             self.f_mat.focus = True
 
     # --- reimprimir la ultima captura
+    
+    # --- reimprimir la ultima captura
     def reimprimir(self):
         zpl = self.db.get_meta("ultimo_zpl")
         if not zpl:
             return self.msg("Aún no hay una etiqueta para reimprimir")
+
         mac = self.impresoras.get(self.spin.text)
         if not mac:
             return self.msg("Selecciona una impresora")
+
         resumen = self.db.get_meta("ultimo_resumen", "")
-        self.msg(f"Reimprimiendo: {resumen}")
-        threading.Thread(target=self._reenviar, args=(mac, zpl, resumen), daemon=True).start()
+
+        # Contenido de la confirmación
+        caja = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=dp(12)
+        )
+
+        texto = Label(
+            text=(
+                "[b]¿Deseas reimprimir las últimas etiquetas?[/b]\n\n"
+                f"[color=ffcc00]{escape_markup(resumen)}[/color]\n\n"
+                "Se enviarán nuevamente a la impresora."
+            ),
+            markup=True,
+            color=BLANCO,
+            font_size="17sp",
+            halign="center",
+            valign="middle"
+        )
+        texto.bind(size=lambda w, s: setattr(w, "text_size", s))
+
+        botones = BoxLayout(
+            size_hint_y=None,
+            height=dp(54),
+            spacing=dp(10)
+        )
+
+        btn_cancelar = Boton(
+            "CANCELAR",
+            fondo=GRIS_OSC,
+            tinta=BLANCO
+        )
+
+        btn_confirmar = Boton(
+            "CONFIRMAR",
+            fondo=AMARILLO,
+            tinta=NEGRO,
+            font_size="14sp"
+        )
+
+        botones.add_widget(btn_cancelar)
+        botones.add_widget(btn_confirmar)
+
+        caja.add_widget(texto)
+        caja.add_widget(botones)
+
+        pop = Popup(
+            title="Confirmar reimpresión",
+            content=caja,
+            title_color=AMARILLO,
+            separator_color=AMARILLO,
+            background="",
+            background_color=NEGRO,
+            size_hint=(0.92, None),
+            height=dp(290),
+            auto_dismiss=False
+        )
+
+        btn_cancelar.bind(
+            on_release=lambda *_: pop.dismiss()
+        )
+
+        def confirmar(*_):
+            pop.dismiss()
+            self.msg(f"Reimprimiendo: {resumen}")
+            threading.Thread(
+                target=self._reenviar,
+                args=(mac, zpl, resumen),
+                daemon=True
+            ).start()
+
+        btn_confirmar.bind(on_release=confirmar)
+
+        pop.open()
 
     def _reenviar(self, mac, zpl, resumen):
         try:
@@ -1239,37 +1422,143 @@ class Raiz(BoxLayout):
         self.msg(texto)
 
 
+
 class EtiquetasApp(App):
     title = "Inventory HC"
     icon = os.path.join(DIR_APP, "icon.png")
 
     def build(self):
         pedir_permisos()
-        db = DB(os.path.join(self.user_data_dir, "materiales.db"))
-        # materiales.csv y bines.csv van empaquetados junto a main.py dentro del APK
-        errores = []
-        n = nb = None
+
+        # Mostrar la pantalla antes de comenzar a cargar los datos
+        self.pantalla_carga = PantallaCarga()
+
+        Clock.schedule_once(
+            self._iniciar_carga,
+            0.2
+        )
+
+        return self.pantalla_carga
+
+    def _iniciar_carga(self, dt):
+        threading.Thread(
+            target=self._cargar_datos,
+            daemon=True
+        ).start()
+
+    def _progreso(self, valor, mensaje):
+        """Programa las actualizaciones visuales en el hilo de Kivy."""
+        Clock.schedule_once(
+            lambda dt: self.pantalla_carga.actualizar(
+                valor, mensaje
+            ),
+            0
+        )
+
+    def _cargar_datos(self):
+        """Carga SQLite y los CSV fuera del hilo visual."""
+
         try:
-            n = db.cargar_incluido(os.path.join(DIR_APP, "materiales.csv"))
+            self._progreso(5, "Preparando base de datos...")
+
+            db = DB(
+                os.path.join(
+                    self.user_data_dir,
+                    "materiales.db"
+                )
+            )
+
+            errores = []
+            n = nb = None
+
+            self._progreso(20, "Cargando catálogo de materiales...")
+
+            try:
+                n = db.cargar_incluido(
+                    os.path.join(DIR_APP, "materiales.csv")
+                )
+            
+            except Exception as e:
+                mensaje = str(e)
+                Clock.schedule_once(
+                    lambda dt, m=mensaje: self._error_inicio(m),
+                    0
+            )
+
+            self._progreso(55, "Cargando ubicaciones BIN...")
+
+            try:
+                nb = db.cargar_bines(
+                    os.path.join(DIR_APP, "bines.csv")
+                )
+            except Exception as e:
+                errores.append(f"bines.csv: {e}")
+
+            self._progreso(85, "Preparando interfaz...")
+
+            # Entregar los resultados al hilo principal
+            Clock.schedule_once(
+                lambda dt: self._mostrar_aplicacion(
+                    db, n, nb, errores
+                ),
+                0
+            )
+
         except Exception as e:
-            errores.append(f"materiales.csv: {e}")
-        try:
-            nb = db.cargar_bines(os.path.join(DIR_APP, "bines.csv"))
-        except Exception as e:
-            errores.append(f"bines.csv: {e}")
+            Clock.schedule_once(
+                lambda dt: self._error_inicio(str(e)),
+                0
+            )
+
+    def _mostrar_aplicacion(self, db, n, nb, errores):
+        """Construye la interfaz cuando los datos ya están cargados."""
+
         raiz = Raiz(db)
+
         if errores:
             raiz.msg("Error al cargar " + " | ".join(errores))
         else:
             partes = []
+
             if n:
                 partes.append(f"{n} materiales")
+
             if nb:
                 partes.append(f"{nb} BINs")
+
             if partes:
                 raiz.msg("Base cargada: " + ", ".join(partes))
-        return raiz
 
+        # Sustituir la pantalla de carga por la interfaz normal
+
+        self.pantalla_carga.actualizar(
+            100,
+            "Carga completada"
+        )
+
+        Clock.schedule_once(
+            lambda dt: self._mostrar_raiz(raiz),
+            0.2
+        )
+
+    def _mostrar_raiz(self, raiz):
+        self.pantalla_carga.clear_widgets()
+        self.pantalla_carga.add_widget(raiz)
+
+        # La barra llega al 100 % al terminar la transición
+        # hacia la pantalla principal.
+        # Ya no es necesario conservar la pantalla visual anterior.
+
+    
+    def _error_inicio(self, mensaje):
+        self.pantalla_carga.actualizar(
+            0,
+            "No se pudo iniciar la aplicación"
+        )
+        self.pantalla_carga.estado.text = (
+            "Error al iniciar:\n" + mensaje
+        )
+        print("Error al iniciar Inventory HC:", mensaje)
 
 if __name__ == "__main__":
     EtiquetasApp().run()
