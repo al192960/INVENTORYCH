@@ -14,6 +14,10 @@ import sqlite3
 import threading
 from datetime import datetime
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from kivy.app import App
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
@@ -38,6 +42,50 @@ Window.softinput_mode = "below_target"
 SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB"
 MODO_BIN = "BIN"
 MODO_SL = "SLOC"
+
+
+# --------------------------------------------------------- CSV cifrados
+# Formato: magic(8) + salt(16) + nonce(12) + ciphertext/tag(AES-GCM).
+# La contraseña NO se guarda en el código ni dentro del APK.
+_MAGIC_CIFRADO = b"IHCAESG1"
+_SALT_LEN = 16
+_NONCE_LEN = 12
+_ITERACIONES_KDF = 300_000
+
+def _derivar_clave(password, salt):
+    if not password:
+        raise ValueError("Debes escribir la contraseña de administrador.")
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=_ITERACIONES_KDF)
+    return kdf.derive(password.encode("utf-8"))
+
+def descifrar_csv(ruta, password):
+    """Descifra un .enc en memoria; nunca crea un CSV temporal en texto claro."""
+    with open(ruta, "rb") as f:
+        blob = f.read()
+    cabecera = len(_MAGIC_CIFRADO) + _SALT_LEN + _NONCE_LEN
+    if len(blob) <= cabecera or blob[:len(_MAGIC_CIFRADO)] != _MAGIC_CIFRADO:
+        raise ValueError(f"El archivo cifrado no tiene un formato válido: {os.path.basename(ruta)}")
+    pos = len(_MAGIC_CIFRADO)
+    salt = blob[pos:pos + _SALT_LEN]
+    pos += _SALT_LEN
+    nonce = blob[pos:pos + _NONCE_LEN]
+    pos += _NONCE_LEN
+    clave = _derivar_clave(password, salt)
+    try:
+        return AESGCM(clave).decrypt(nonce, blob[pos:], _MAGIC_CIFRADO)
+    except Exception as exc:
+        raise ValueError("Contraseña incorrecta o archivo cifrado dañado.") from exc
+
+def _hash_assets_cifrados():
+    h = hashlib.sha256()
+    for nombre in ("materiales.csv.enc", "bines.csv.enc"):
+        ruta = os.path.join(DIR_APP, nombre)
+        if not os.path.isfile(ruta):
+            raise FileNotFoundError(f"No se encontró {nombre}. Debes incluirlo en el APK.")
+        with open(ruta, "rb") as f:
+            h.update(nombre.encode("utf-8"))
+            h.update(f.read())
+    return h.hexdigest()
 
 
 # ----------------------------------------------------------------- Base de datos
@@ -93,18 +141,21 @@ class DB:
         self.con.commit()
 
     # --- catalogo
-    def cargar_incluido(self, ruta):
-        """Carga el CSV empaquetado en el APK. Si cambio desde la ultima vez
-        (APK nuevo con CSV nuevo), reemplaza el catalogo."""
-        if not os.path.exists(ruta):
-            return None
-        with open(ruta, "rb") as f:
-            huella = hashlib.md5(f.read()).hexdigest()
+    def cargar_incluido(self, ruta, contenido=None):
+        """Importa el CSV incluido. contenido permite procesar bytes descifrados en memoria."""
+        if contenido is None:
+            if not os.path.exists(ruta):
+                return None
+            with open(ruta, "rb") as f:
+                crudo = f.read()
+        else:
+            crudo = bytes(contenido)
+        huella = hashlib.sha256(crudo).hexdigest()
         if self.get_meta("csv_hash") == huella:
             return 0
         try:
             self.con.execute("DELETE FROM materiales")
-            n = self.importar_csv(ruta)
+            n = self.importar_csv(crudo)
         except Exception:
             self.con.rollback()  # conserva el catalogo anterior
             raise
@@ -112,9 +163,12 @@ class DB:
         return n
 
     def importar_csv(self, ruta):
-        """CSV con encabezado: material,unidad[,descripcion]"""
-        with open(ruta, "rb") as f:
-            crudo = f.read()
+        """CSV con encabezado: material,unidad[,descripcion]; acepta ruta o bytes."""
+        if isinstance(ruta, (bytes, bytearray, memoryview)):
+            crudo = bytes(ruta)
+        else:
+            with open(ruta, "rb") as f:
+                crudo = f.read()
         # UTF-8 (con o sin BOM) y, si no, Windows-1252 (Excel "CSV delimitado por comas")
         for enc in ("utf-8-sig", "cp1252", "latin-1"):
             try:
@@ -175,14 +229,15 @@ class DB:
         return False
 
     # --- BINs validos (bines.csv)
-    def cargar_bines(self, ruta):
-        """Carga bines.csv empaquetado. Una columna con los BINs validos; el
-        encabezado es opcional (bin, storage bin, ubicacion...). Si el archivo
-        cambio desde la ultima vez, reemplaza la lista."""
-        if not os.path.exists(ruta):
-            return None
-        with open(ruta, "rb") as f:
-            crudo = f.read()
+    def cargar_bines(self, ruta, contenido=None):
+        """Carga los BINs desde una ruta o bytes descifrados en memoria."""
+        if contenido is None:
+            if not os.path.exists(ruta):
+                return None
+            with open(ruta, "rb") as f:
+                crudo = f.read()
+        else:
+            crudo = bytes(contenido)
         huella = hashlib.md5(crudo).hexdigest()
         if self.get_meta("bines_hash") == huella:
             return 0
@@ -1407,22 +1462,60 @@ class EtiquetasApp(App):
 
     def build(self):
         pedir_permisos()
-
-        # Mostrar la pantalla antes de comenzar a cargar los datos
         self.pantalla_carga = PantallaCarga()
-
-        Clock.schedule_once(
-            self._iniciar_carga,
-            0.2
-        )
-
+        Clock.schedule_once(self._preparar_inicio, 0.2)
         return self.pantalla_carga
 
+    def _preparar_inicio(self, dt):
+        """Solo pide contraseña si es la primera carga o cambiaron los .enc."""
+        try:
+            huella = _hash_assets_cifrados()
+            db_path = os.path.join(self.user_data_dir, "materiales.db")
+            if os.path.exists(db_path):
+                db = DB(db_path)
+                misma_version = db.get_meta("assets_enc_hash") == huella
+                tiene_materiales = db.con.execute("SELECT 1 FROM materiales LIMIT 1").fetchone() is not None
+                tiene_bines = db.con.execute("SELECT 1 FROM bines LIMIT 1").fetchone() is not None
+                db.con.close()
+                if misma_version and tiene_materiales and tiene_bines:
+                    self._clave_catalogo = None
+                    self._iniciar_carga(None)
+                    return
+            self._mostrar_solicitud_clave()
+        except Exception as e:
+            self._error_inicio(str(e))
+
+    def _mostrar_solicitud_clave(self):
+        caja = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
+        caja.add_widget(Label(text="Introduce la contraseña de administrador para\ndescifrar el catálogo local.", size_hint_y=None, height=dp(55)))
+        entrada = TextInput(password=True, multiline=False, hint_text="Contraseña", size_hint_y=None, height=dp(46))
+        caja.add_widget(entrada)
+        botones = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        aceptar = Button(text="Desbloquear")
+        salir = Button(text="Cerrar")
+        botones.add_widget(aceptar)
+        botones.add_widget(salir)
+        caja.add_widget(botones)
+        pop = Popup(title="Inventory HC · Catálogo protegido", content=caja, size_hint=(0.9, None), height=dp(235), auto_dismiss=False)
+        def cancelar(*_):
+            pop.dismiss()
+            self.stop()
+        def aceptar_clave(*_):
+            clave = entrada.text
+            if not clave:
+                entrada.hint_text = "La contraseña es obligatoria"
+                return
+            self._clave_catalogo = clave
+            pop.dismiss()
+            self._iniciar_carga(None)
+        aceptar.bind(on_release=aceptar_clave)
+        salir.bind(on_release=cancelar)
+        entrada.bind(on_text_validate=aceptar_clave)
+        pop.open()
+        entrada.focus = True
+
     def _iniciar_carga(self, dt):
-        threading.Thread(
-            target=self._cargar_datos,
-            daemon=True
-        ).start()
+        threading.Thread(target=self._cargar_datos, daemon=True).start()
 
     def _progreso(self, valor, mensaje):
         """Programa las actualizaciones visuales en el hilo de Kivy."""
@@ -1451,26 +1544,23 @@ class EtiquetasApp(App):
 
             self._progreso(20, "Cargando catálogo de materiales...")
 
-            try:
-                n = db.cargar_incluido(
-                    os.path.join(DIR_APP, "materiales.csv")
-                )
-            
-            except Exception as e:
-                mensaje = str(e)
-                Clock.schedule_once(
-                    lambda dt, m=mensaje: self._error_inicio(m),
-                    0
-            )
-
-            self._progreso(55, "Cargando ubicaciones BIN...")
-
-            try:
-                nb = db.cargar_bines(
-                    os.path.join(DIR_APP, "bines.csv")
-                )
-            except Exception as e:
-                errores.append(f"bines.csv: {e}")
+            # Si la huella coincide, los datos ya están en SQLite y no se pide clave.
+            huella_actual = _hash_assets_cifrados()
+            if db.get_meta("assets_enc_hash") == huella_actual:
+                n = 0
+                nb = 0
+            else:
+                clave = getattr(self, "_clave_catalogo", None)
+                if not clave:
+                    raise ValueError("Se necesita la contraseña para importar los catálogos cifrados.")
+                materiales = descifrar_csv(os.path.join(DIR_APP, "materiales.csv.enc"), clave)
+                bines = descifrar_csv(os.path.join(DIR_APP, "bines.csv.enc"), clave)
+                n = db.cargar_incluido("materiales.csv", contenido=materiales)
+                self._progreso(55, "Cargando ubicaciones BIN...")
+                nb = db.cargar_bines("bines.csv", contenido=bines)
+                # Guardar solo la huella de los archivos cifrados; nunca la contraseña.
+                db.set_meta("assets_enc_hash", huella_actual)
+                self._clave_catalogo = None
 
             self._progreso(85, "Preparando interfaz...")
 

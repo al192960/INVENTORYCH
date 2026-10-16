@@ -3,10 +3,10 @@ title = Inventory HC
 package.name = etiquetaszebra
 package.domain = org.ejemplo
 source.dir = .
-source.include_exts = py,png,jpg,kv,csv
+source.include_exts = py,png,jpg,kv,csv,enc
 source.exclude_dirs = .venv,venv,__pycache__,bin,.buildozer,.vscode,.git
 version = 0.7
-requirements = hostpython3==3.11.5,python3==3.11.5,kivy==2.3.0,pyjnius,plyer,android
+requirements = hostpython3==3.11.5,python3==3.11.5,kivy==2.3.0,pyjnius,plyer,android,cryptography
 orientation = portrait
 fullscreen = 0
 
