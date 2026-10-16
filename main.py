@@ -12,6 +12,7 @@ import io
 import os
 import sqlite3
 import threading
+import traceback
 from datetime import datetime
 
 from cryptography.hazmat.primitives import hashes
@@ -1573,41 +1574,37 @@ class EtiquetasApp(App):
             )
 
         except Exception as e:
+            # Capturar el texto ahora: las variables de excepción se liberan
+            # al salir del bloque except y no deben usarse dentro de una lambda.
+            mensaje = f"{type(e).__name__}: {e}"
+            detalle = traceback.format_exc()
             Clock.schedule_once(
-                lambda dt: self._error_inicio(str(e)),
+                lambda dt, msg=mensaje, tb=detalle: self._error_inicio(msg, tb),
                 0
             )
 
     def _mostrar_aplicacion(self, db, n, nb, errores):
-        """Construye la interfaz cuando los datos ya están cargados."""
+        """Construye la interfaz y muestra errores en pantalla en vez de cerrar."""
+        try:
+            raiz = Raiz(db)
 
-        raiz = Raiz(db)
+            if errores:
+                raiz.msg("Error al cargar " + " | ".join(errores))
+            else:
+                partes = []
+                if n:
+                    partes.append(f"{n} materiales")
+                if nb:
+                    partes.append(f"{nb} BINs")
+                if partes:
+                    raiz.msg("Base cargada: " + ", ".join(partes))
 
-        if errores:
-            raiz.msg("Error al cargar " + " | ".join(errores))
-        else:
-            partes = []
-
-            if n:
-                partes.append(f"{n} materiales")
-
-            if nb:
-                partes.append(f"{nb} BINs")
-
-            if partes:
-                raiz.msg("Base cargada: " + ", ".join(partes))
-
-        # Sustituir la pantalla de carga por la interfaz normal
-
-        self.pantalla_carga.actualizar(
-            100,
-            "Carga completada"
-        )
-
-        Clock.schedule_once(
-            lambda dt: self._mostrar_raiz(raiz),
-            0.2
-        )
+            self.pantalla_carga.actualizar(100, "Carga completada")
+            Clock.schedule_once(lambda dt, r=raiz: self._mostrar_raiz(r), 0.2)
+        except Exception as e:
+            mensaje = f"{type(e).__name__}: {e}"
+            detalle = traceback.format_exc()
+            self._error_inicio(mensaje, detalle)
 
     def _mostrar_raiz(self, raiz):
         self.pantalla_carga.clear_widgets()
@@ -1618,15 +1615,24 @@ class EtiquetasApp(App):
         # Ya no es necesario conservar la pantalla visual anterior.
 
     
-    def _error_inicio(self, mensaje):
-        self.pantalla_carga.actualizar(
-            0,
-            "No se pudo iniciar la aplicación"
-        )
-        self.pantalla_carga.estado.text = (
-            "Error al iniciar:\n" + mensaje
-        )
+    def _error_inicio(self, mensaje, detalle=""):
+        """Deja el error visible y guarda el traceback en el almacenamiento privado."""
+        try:
+            self.pantalla_carga.actualizar(0, "No se pudo iniciar la aplicación")
+            self.pantalla_carga.estado.text = "Error al iniciar:\n" + mensaje
+        except Exception:
+            pass
         print("Error al iniciar Inventory HC:", mensaje)
+        if detalle:
+            print(detalle)
+        try:
+            ruta = os.path.join(self.user_data_dir, "error_inicio.txt")
+            with open(ruta, "a", encoding="utf-8") as f:
+                f.write("\n--- Error de inicio ---\n")
+                f.write(mensaje + "\n")
+                f.write(detalle + "\n")
+        except Exception as log_error:
+            print("No se pudo guardar error_inicio.txt:", log_error)
 
 if __name__ == "__main__":
     EtiquetasApp().run()
