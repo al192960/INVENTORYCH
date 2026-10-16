@@ -16,6 +16,7 @@ import traceback
 from datetime import datetime
 
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -56,7 +57,7 @@ _ITERACIONES_KDF = 300_000
 def _derivar_clave(password, salt):
     if not password:
         raise ValueError("Debes escribir la contraseña de administrador.")
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=_ITERACIONES_KDF)
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=_ITERACIONES_KDF, backend=default_backend())
     return kdf.derive(password.encode("utf-8"))
 
 def descifrar_csv(ruta, password):
