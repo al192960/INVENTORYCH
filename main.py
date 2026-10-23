@@ -462,8 +462,9 @@ def generar_zpl(modo, material, desc, qty, unidad, bin_):
     )
     copias_qr = int(getattr(config, "COPIAS_QR", 1))
     return (
-        zpl_etiqueta_qr(modo, m, d, q, u, b, fecha, copias_qr)
-        + zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
+        #zpl_etiqueta_qr(modo, m, d, q, u, b, fecha, copias_qr)
+        #+ 
+        zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
     )
 # ------------------------------------------------------------------ Android
 def pedir_permisos():
