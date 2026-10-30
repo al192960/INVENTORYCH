@@ -1,10 +1,3 @@
-"""
-Inventory HC - Etiquetas Zebra ZQ630 (4x2 in, 203 dpi) - Kivy + pyjnius
-
-Modos:
-  BIN               QR = material TAB um TAB bin TAB qty TAB TAB TAB TAB
-  STORAGE LOCATION  QR = material TAB um TAB qty TAB TAB TAB TAB   (sin bin)
-"""
 import csv
 import hashlib
 import hmac
@@ -38,6 +31,7 @@ from kivy.uix.progressbar import ProgressBar
 from kivy.uix.floatlayout import FloatLayout
 
 import config
+from translations import translate
 
 Window.softinput_mode = "below_target"
 
@@ -462,9 +456,8 @@ def generar_zpl(modo, material, desc, qty, unidad, bin_):
     )
     copias_qr = int(getattr(config, "COPIAS_QR", 1))
     return (
-        #zpl_etiqueta_qr(modo, m, d, q, u, b, fecha, copias_qr)
-        #+ 
-        zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
+        zpl_etiqueta_qr(modo, m, d, q, u, b, fecha, copias_qr)
+        + zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
     )
 # ------------------------------------------------------------------ Android
 def pedir_permisos():
@@ -890,7 +883,7 @@ class BarraEstado(BoxLayout):
             Color(*AMARILLO)
             self._linea = Rectangle(pos=(self.x, self.top - dp(3)), size=(self.width, dp(3)))
         self.bind(pos=self._mover, size=self._mover)
-        self.label = Label(text="Listo", color=AMARILLO, font_size="15sp",
+        self.label = Label(text=translate("ready"), color=AMARILLO, font_size="15sp",
                            halign="left", valign="middle", max_lines=2)
         self.label.bind(size=lambda w, s: setattr(w, "text_size", s))
         self.add_widget(self.label)
@@ -967,7 +960,7 @@ class PantallaCarga(FloatLayout):
         panel.add_widget(titulo)
 
         self.estado = Label(
-            text="Iniciando aplicación...",
+            text=translate("startup"),
             color=BLANCO,
             font_size="15sp",
             size_hint=(1, 0.20)
@@ -1006,6 +999,9 @@ class Raiz(BoxLayout):
     def __init__(self, db, **kw):
         super().__init__(orientation="vertical", spacing=0, padding=0, **kw)
         self.db = db
+        self.language = db.get_meta("language", "es")
+        if self.language not in ("es", "en"):
+            self.language = "es"
         self.impresoras = {}
         self.material_ok = False
         self._pop_aviso = None  # ventana de aviso abierta (unidad / producto terminado)
@@ -1016,6 +1012,7 @@ class Raiz(BoxLayout):
         self.spin = Selector(text="Selecciona impresora")
         b_act = Boton("Actualizar", fondo=NEGRO, tinta=AMARILLO, font_size="13sp",
                       size_hint_x=0.3)
+        self.btn_refresh = b_act
         b_act.bind(on_release=lambda *_: self.cargar_impresoras())
         fila_imp = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
         self.spin.size_hint_x = 0.7
@@ -1025,6 +1022,11 @@ class Raiz(BoxLayout):
         self.btn_modo = Boton("", fondo=NEGRO, tinta=AMARILLO, font_size="16sp",
                               size_hint_y=None, height=dp(46))
         self.btn_modo.bind(on_release=lambda *_: self.cambiar_modo())
+
+        # --- selector de idioma (persiste en SQLite)
+        self.btn_lang = Boton("", fondo=NEGRO, tinta=AMARILLO,
+                              size_hint_y=None, height=dp(42))
+        self.btn_lang.bind(on_release=lambda *_: self.cambiar_idioma())
 
         # --- captura
         self.f_mat = Campo("Material (escanear)")
@@ -1062,7 +1064,7 @@ class Raiz(BoxLayout):
         contenido = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None,
                               padding=[dp(12), dp(10), dp(12), dp(10)])
         contenido.bind(minimum_height=contenido.setter("height"))
-        for w in (fila_imp, self.btn_modo, self.f_mat, self.info, self.panel_alta,
+        for w in (fila_imp, self.btn_lang, self.btn_modo, self.f_mat, self.info, self.panel_alta,
                   self.f_bin, self.f_qty, self.btn_print, self.btn_reimp):
             contenido.add_widget(w)
         scroll = ScrollView(do_scroll_x=False, bar_width=dp(3), bar_color=AMARILLO_OSC)
@@ -1070,6 +1072,7 @@ class Raiz(BoxLayout):
 
         barra = BarraEstado()
         self.estado = barra.label
+        self.aplicar_traducciones()
 
         self.add_widget(Encabezado())
         self.add_widget(scroll)
@@ -1081,13 +1084,40 @@ class Raiz(BoxLayout):
         self.cargar_impresoras()
         self.f_mat.focus = True
 
+    def t(self, key, **kwargs):
+        return translate(key, self.language, **kwargs)
+
+    def cambiar_idioma(self):
+        self.language = "en" if self.language == "es" else "es"
+        self.db.set_meta("language", self.language)
+        App.get_running_app().language = self.language
+        self.aplicar_traducciones()
+        self.aplicar_modo()
+        self.msg(self.t("ready"))
+
+    def aplicar_traducciones(self):
+        self.btn_lang.text = ("English  |  Cambiar idioma" if self.language == "es"
+                              else "Español  |  Switch language")
+        self.btn_refresh.text = self.t("refresh")
+        self.f_mat.hint_text = self.t("material_hint")
+        self.f_uni.hint_text = self.t("unit_hint")
+        self.f_desc.hint_text = self.t("desc_hint")
+        self.f_bin.hint_text = self.t("bin_hint")
+        self.btn_alta.text = self.t("add")
+        self.btn_print.text = self.t("print")
+        self.btn_reimp.text = self.t("reprint")
+        if not self.impresoras:
+            self.spin.text = self.t("printer_select")
+        if self.panel_alta.height > 0 and not self.material_ok:
+            self.info.text = self.t("not_found")
+
     def msg(self, texto):
         self.estado.text = texto
 
     # --- modo BIN / STORAGE LOCATION
     def aplicar_modo(self):
         es_bin = self.modo == MODO_BIN
-        self.btn_modo.text = f"MODO: {self.modo}  (toca para cambiar)"
+        self.btn_modo.text = self.t("mode", mode=self.modo)
         self.f_bin.height = dp(52) if es_bin else 0
         self.f_bin.opacity = 1 if es_bin else 0
         self.aplicar_estado()
@@ -1097,7 +1127,7 @@ class Raiz(BoxLayout):
         self.db.set_meta("modo", self.modo)
         self.f_bin.text = ""
         self.aplicar_modo()
-        self.msg(f"Modo {self.modo}")
+        self.msg(self.t("mode_changed", mode=self.modo))
         self.f_mat.focus = True
 
     # --- control de estado: sin material valido no se captura ni se imprime
@@ -1132,21 +1162,21 @@ class Raiz(BoxLayout):
         if self.impresoras and self.spin.text not in self.impresoras:
             zebra = [n for n in self.impresoras if "zq" in n.lower() or "zebra" in n.lower()]
             self.spin.text = (zebra or list(self.impresoras))[0]
-        self.msg(f"{len(self.impresoras)} impresora(s) emparejada(s)")
+        self.msg(self.t("paired", count=len(self.impresoras)))
 
     # --- contrasena (para dar de alta materiales)
     def pedir_password(self, accion):
         caja = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
-        campo = Campo("Contraseña", password=True, mayusculas=False)
+        campo = Campo(self.t("password"), password=True, mayusculas=False)
         aviso = Label(text="", size_hint_y=None, height=dp(24), color=AMARILLO)
         botones = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
-        b_ok = Boton("Aceptar")
-        b_no = Boton("Cancelar", fondo=GRIS_OSC, tinta=BLANCO)
+        b_ok = Boton(self.t("accept"))
+        b_no = Boton(self.t("cancel"), fondo=GRIS_OSC, tinta=BLANCO)
         botones.add_widget(b_no)
         botones.add_widget(b_ok)
         for w in (campo, aviso, botones):
             caja.add_widget(w)
-        pop = Popup(title="Contraseña requerida", content=caja, title_color=AMARILLO,
+        pop = Popup(title=self.t("password_required"), content=caja, title_color=AMARILLO,
                     separator_color=AMARILLO, background="", background_color=NEGRO,
                     size_hint=(0.92, None), height=dp(240), auto_dismiss=False)
 
@@ -1156,7 +1186,7 @@ class Raiz(BoxLayout):
                 pop.dismiss()
                 accion()
             else:
-                aviso.text = "Contraseña incorrecta"
+                aviso.text = self.t("password_wrong")
                 campo.text = ""
                 Clock.schedule_once(lambda dt: setattr(campo, "focus", True), 0)
 
@@ -1173,7 +1203,7 @@ class Raiz(BoxLayout):
             return
         fila = self.db.buscar(mat)
         if not fila:
-            self.info.text = "NO EXISTE en la base. Agrégalo abajo"
+            self.info.text = self.t("not_found")
             self.mostrar_alta(True)
             sonido_error()
             self.f_uni.focus = True
@@ -1213,8 +1243,8 @@ class Raiz(BoxLayout):
         texto = Label(text=cuerpo, markup=True, halign="center", valign="middle",
                       color=BLANCO, font_size="17sp")
         texto.bind(size=lambda w, sz: setattr(w, "text_size", sz))
-        b_no = Boton("Cancelar", fondo=GRIS_OSC, tinta=BLANCO)
-        b_ok = Boton("ACEPTAR")
+        b_no = Boton(self.t("cancel"), fondo=GRIS_OSC, tinta=BLANCO)
+        b_ok = Boton(self.t("accept"))
         botones = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(8))
         botones.add_widget(b_no)
         botones.add_widget(b_ok)
@@ -1249,23 +1279,23 @@ class Raiz(BoxLayout):
         nombre = NOMBRES_UNIDAD.get(unidad)
         detalle = f"({escape_markup(nombre)})\n" if nombre else ""
         um = escape_markup(unidad)
-        cuerpo = (f"ESTE MATERIAL SE CUENTA POR\n"
+        cuerpo = (f"{self.t('unit_body')}\n"
                   f"[color=ffcc00][size=52sp][b]{um}[/b][/size][/color]\n{detalle}"
-                  f"Captura la cantidad en {um}.")
-        self._aviso("Unidad de medida diferente", cuerpo, siguiente)
+                  f"{self.t('unit_capture', unit=um)}")
+        self._aviso(self.t("unit_warning"), cuerpo, siguiente)
 
     def confirmar_terminado(self, siguiente):
         """Aviso (modo SLOC): producto terminado, revisar componentes por explosionar."""
-        cuerpo = ("[color=ffcc00][size=30sp][b]PRODUCTO TERMINADO[/b][/size][/color]\n\n"
-                  "Validar si el material \n ya fue capturado en SAP.")
-        self._aviso("Verificar componentes", cuerpo, siguiente, alto=300)
+        cuerpo = (f"[color=ffcc00][size=30sp][b]{self.t('fg_heading')}[/b][/size][/color]\n\n"
+                  f"{self.t('fg_body')}")
+        self._aviso(self.t("fg_warning"), cuerpo, siguiente, alto=300)
 
     def agregar_material(self, *_):
         """Valida los datos y pide contrasena antes de guardar."""
         if not self.f_mat.text.strip():
             return
         if not self.f_uni.text.strip():
-            self.msg("La unidad de medida es obligatoria")
+            self.msg(self.t("unit_required"))
             self.f_uni.focus = True
             return
         self.pedir_password(self._guardar_material)
@@ -1275,7 +1305,7 @@ class Raiz(BoxLayout):
         uni = self.f_uni.text.strip().upper()
         desc = self.f_desc.text.strip().upper()
         self.db.agregar(mat, desc, uni)
-        self.msg(f"Material {mat} agregado a la base")
+        self.msg(self.t("material_added", mat=mat))
         self.f_uni.text = self.f_desc.text = ""
         self.al_material()  # ya existe: desbloquea y sigue a cantidad
 
@@ -1284,11 +1314,11 @@ class Raiz(BoxLayout):
     # --- validacion de BIN contra bines.csv
     def bin_valido(self, b):
         if not self.db.hay_bines():
-            self.msg("La base de BINs está vacía (falta bines.csv). No se imprime.")
+            self.msg(self.t("bin_db_empty"))
             sonido_error()
             return False
         if not self.db.bin_existe(b):
-            self.msg(f"El BIN {b} NO existe. No se imprime.")
+            self.msg(self.t("bin_invalid", bin=b))
             sonido_error()
             return False
         return True
@@ -1314,34 +1344,34 @@ class Raiz(BoxLayout):
 
         if self.modo == MODO_BIN:
             if not bin_:
-                return self.msg("Falta el bin")
+                return self.msg(self.t("bin_missing"))
             if not self.bin_valido(bin_):
                 return
         mac = self.impresoras.get(self.spin.text)
         if not mac:
-            return self.msg("Selecciona una impresora")
+            return self.msg(self.t("printer_missing"))
         if not fila:
             sonido_error()
-            return self.msg("Material no existe en la base")
+            return self.msg(self.t("material_missing"))
         try:
             if float(qty) <= 0:
                 raise ValueError
         except ValueError:
-            return self.msg("Captura una cantidad valida")
+            return self.msg(self.t("qty_invalid"))
 
         desc, unidad = fila
         zpl = generar_zpl(self.modo, mat, desc, qty, unidad, bin_)
         resumen = " | ".join(
             [mat] + ([f"BIN {bin_}"] if bin_ else []) + [f"QTY {qty} {unidad}"]
         )
-        self.msg("Imprimiendo...")
+        self.msg(self.t("printing"))
         threading.Thread(target=self._enviar, args=(mac, zpl, resumen), daemon=True).start()
 
     def _enviar(self, mac, zpl, resumen):
         try:
             if not enviar_bluetooth(mac, zpl):
                 raise RuntimeError("no se pudo enviar a la impresora")
-            self.despues_de_imprimir(True, "3 etiquetas enviadas", zpl, resumen)
+            self.despues_de_imprimir(True, self.t("printed"), zpl, resumen)
         except Exception as e:
             self.despues_de_imprimir(False, f"Error: {e}")
 
@@ -1362,11 +1392,11 @@ class Raiz(BoxLayout):
     def reimprimir(self):
         zpl = self.db.get_meta("ultimo_zpl")
         if not zpl:
-            return self.msg("Aún no hay una etiqueta para reimprimir")
+            return self.msg(self.t("no_reprint"))
 
         mac = self.impresoras.get(self.spin.text)
         if not mac:
-            return self.msg("Selecciona una impresora")
+            return self.msg(self.t("printer_missing"))
 
         resumen = self.db.get_meta("ultimo_resumen", "")
 
@@ -1379,9 +1409,9 @@ class Raiz(BoxLayout):
 
         texto = Label(
             text=(
-                "[b]¿Deseas reimprimir las últimas etiquetas?[/b]\n\n"
+                f"[b]{self.t('reprint_question')}[/b]\n\n"
                 f"[color=ffcc00]{escape_markup(resumen)}[/color]\n\n"
-                "Se enviarán nuevamente a la impresora."
+                f"{self.t('reprint_notice')}"
             ),
             markup=True,
             color=BLANCO,
@@ -1398,13 +1428,13 @@ class Raiz(BoxLayout):
         )
 
         btn_cancelar = Boton(
-            "CANCELAR",
+            self.t("cancel").upper(),
             fondo=GRIS_OSC,
             tinta=BLANCO
         )
 
         btn_confirmar = Boton(
-            "CONFIRMAR",
+            self.t("confirm"),
             fondo=AMARILLO,
             tinta=NEGRO,
             font_size="14sp"
@@ -1417,7 +1447,7 @@ class Raiz(BoxLayout):
         caja.add_widget(botones)
 
         pop = Popup(
-            title="Confirmar reimpresión",
+            title=self.t("reprint_confirm"),
             content=caja,
             title_color=AMARILLO,
             separator_color=AMARILLO,
@@ -1434,7 +1464,7 @@ class Raiz(BoxLayout):
 
         def confirmar(*_):
             pop.dismiss()
-            self.msg(f"Reimprimiendo: {resumen}")
+            self.msg(self.t("reprinting", summary=resumen))
             threading.Thread(
                 target=self._reenviar,
                 args=(mac, zpl, resumen),
@@ -1449,7 +1479,7 @@ class Raiz(BoxLayout):
         try:
             if not enviar_bluetooth(mac, zpl):
                 raise RuntimeError("no se pudo enviar a la impresora")
-            self.fin_reimpresion(f"Reimpresas 3 etiquetas: {resumen}")
+            self.fin_reimpresion(self.t("reprinted", summary=resumen))
         except Exception as e:
             self.fin_reimpresion(f"Error: {e}")
 
@@ -1463,7 +1493,21 @@ class EtiquetasApp(App):
     title = "Inventory HC"
     icon = os.path.join(DIR_APP, "icon.png")
 
+    def tr(self, key, **kwargs):
+        return translate(key, getattr(self, "language", "es"), **kwargs)
+
     def build(self):
+        self.language = "es"
+        try:
+            db_path = os.path.join(self.user_data_dir, "materiales.db")
+            if os.path.isfile(db_path):
+                con = sqlite3.connect(db_path)
+                row = con.execute("SELECT valor FROM meta WHERE clave='language'").fetchone()
+                con.close()
+                if row and row[0] in ("es", "en"):
+                    self.language = row[0]
+        except (sqlite3.Error, OSError):
+            pass
         pedir_permisos()
         self.pantalla_carga = PantallaCarga()
         Clock.schedule_once(self._preparar_inicio, 0.2)
@@ -1490,23 +1534,23 @@ class EtiquetasApp(App):
 
     def _mostrar_solicitud_clave(self):
         caja = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
-        caja.add_widget(Label(text="Introduce la contraseña de administrador para\ndescifrar el catálogo local.", size_hint_y=None, height=dp(55)))
-        entrada = TextInput(password=True, multiline=False, hint_text="Contraseña", size_hint_y=None, height=dp(46))
+        caja.add_widget(Label(text=self.tr("admin_prompt"), size_hint_y=None, height=dp(55)))
+        entrada = TextInput(password=True, multiline=False, hint_text=self.tr("password"), size_hint_y=None, height=dp(46))
         caja.add_widget(entrada)
         botones = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        aceptar = Button(text="Desbloquear")
-        salir = Button(text="Cerrar")
+        aceptar = Button(text=self.tr("unlock"))
+        salir = Button(text=self.tr("close"))
         botones.add_widget(aceptar)
         botones.add_widget(salir)
         caja.add_widget(botones)
-        pop = Popup(title="Inventory HC · Catálogo protegido", content=caja, size_hint=(0.9, None), height=dp(235), auto_dismiss=False)
+        pop = Popup(title=self.tr("catalog_protected"), content=caja, size_hint=(0.9, None), height=dp(235), auto_dismiss=False)
         def cancelar(*_):
             pop.dismiss()
             self.stop()
         def aceptar_clave(*_):
             clave = entrada.text
             if not clave:
-                entrada.hint_text = "La contraseña es obligatoria"
+                entrada.hint_text = self.tr("required_password")
                 return
             self._clave_catalogo = clave
             pop.dismiss()
@@ -1533,7 +1577,7 @@ class EtiquetasApp(App):
         """Carga SQLite y los CSV fuera del hilo visual."""
 
         try:
-            self._progreso(5, "Preparando base de datos...")
+            self._progreso(5, self.tr("db_prepare"))
 
             db = DB(
                 os.path.join(
@@ -1545,7 +1589,7 @@ class EtiquetasApp(App):
             errores = []
             n = nb = None
 
-            self._progreso(20, "Cargando catálogo de materiales...")
+            self._progreso(20, self.tr("db_materials"))
 
             # Si la huella coincide, los datos ya están en SQLite y no se pide clave.
             huella_actual = _hash_assets_cifrados()
@@ -1559,13 +1603,13 @@ class EtiquetasApp(App):
                 materiales = descifrar_csv(os.path.join(DIR_APP, "materiales.csv.enc"), clave)
                 bines = descifrar_csv(os.path.join(DIR_APP, "bines.csv.enc"), clave)
                 n = db.cargar_incluido("materiales.csv", contenido=materiales)
-                self._progreso(55, "Cargando ubicaciones BIN...")
+                self._progreso(55, self.tr("db_bins"))
                 nb = db.cargar_bines("bines.csv", contenido=bines)
                 # Guardar solo la huella de los archivos cifrados; nunca la contraseña.
                 db.set_meta("assets_enc_hash", huella_actual)
                 self._clave_catalogo = None
 
-            self._progreso(85, "Preparando interfaz...")
+            self._progreso(85, self.tr("ui_prepare"))
 
             # Entregar los resultados al hilo principal
             Clock.schedule_once(
@@ -1589,19 +1633,20 @@ class EtiquetasApp(App):
         """Construye la interfaz y muestra errores en pantalla en vez de cerrar."""
         try:
             raiz = Raiz(db)
+            self.language = raiz.language
 
             if errores:
-                raiz.msg("Error al cargar " + " | ".join(errores))
+                raiz.msg(raiz.t("load_error") + " | ".join(errores))
             else:
                 partes = []
                 if n:
-                    partes.append(f"{n} materiales")
+                    partes.append(raiz.t("materials_loaded", count=n))
                 if nb:
                     partes.append(f"{nb} BINs")
                 if partes:
-                    raiz.msg("Base cargada: " + ", ".join(partes))
+                    raiz.msg(raiz.t("db_loaded") + ", ".join(partes))
 
-            self.pantalla_carga.actualizar(100, "Carga completada")
+            self.pantalla_carga.actualizar(100, self.tr("load_done"))
             Clock.schedule_once(lambda dt, r=raiz: self._mostrar_raiz(r), 0.2)
         except Exception as e:
             mensaje = f"{type(e).__name__}: {e}"
@@ -1620,8 +1665,8 @@ class EtiquetasApp(App):
     def _error_inicio(self, mensaje, detalle=""):
         """Deja el error visible y guarda el traceback en el almacenamiento privado."""
         try:
-            self.pantalla_carga.actualizar(0, "No se pudo iniciar la aplicación")
-            self.pantalla_carga.estado.text = "Error al iniciar:\n" + mensaje
+            self.pantalla_carga.actualizar(0, self.tr("startup_failed"))
+            self.pantalla_carga.estado.text = self.tr("startup_error") + "\n" + mensaje
         except Exception:
             pass
         print("Error al iniciar Inventory HC:", mensaje)
