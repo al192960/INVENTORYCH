@@ -999,7 +999,11 @@ class Raiz(BoxLayout):
     def __init__(self, db, **kw):
         super().__init__(orientation="vertical", spacing=0, padding=0, **kw)
         self.db = db
-        self.language = db.get_meta("language", "es")
+        self.idioma_activo = getattr(config, "IDIOMA_ACTIVO", True)
+        if self.idioma_activo:
+            self.language = db.get_meta("language", "es")
+        else:
+            self.language = getattr(config, "IDIOMA_FIJO", "es")
         if self.language not in ("es", "en"):
             self.language = "es"
         self.impresoras = {}
@@ -1027,7 +1031,7 @@ class Raiz(BoxLayout):
         self.btn_lang = Boton("", fondo=NEGRO, tinta=AMARILLO,
                               size_hint_y=None, height=dp(42))
         self.btn_lang.bind(on_release=lambda *_: self.cambiar_idioma())
-
+        
         # --- captura
         self.f_mat = Campo("Material (escanear)")
         self.info = Label(text="", size_hint_y=None, height=dp(34), color=NEGRO, bold=True,
@@ -1064,8 +1068,12 @@ class Raiz(BoxLayout):
         contenido = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None,
                               padding=[dp(12), dp(10), dp(12), dp(10)])
         contenido.bind(minimum_height=contenido.setter("height"))
-        for w in (fila_imp, self.btn_lang, self.btn_modo, self.f_mat, self.info, self.panel_alta,
-                  self.f_bin, self.f_qty, self.btn_print, self.btn_reimp):
+        widgets = [fila_imp]
+        if self.idioma_activo:
+            widgets.append(self.btn_lang)
+        widgets += [self.btn_modo, self.f_mat, self.info, self.panel_alta,
+                    self.f_bin, self.f_qty, self.btn_print, self.btn_reimp]
+        for w in widgets:
             contenido.add_widget(w)
         scroll = ScrollView(do_scroll_x=False, bar_width=dp(3), bar_color=AMARILLO_OSC)
         scroll.add_widget(contenido)
@@ -1410,7 +1418,7 @@ class Raiz(BoxLayout):
         texto = Label(
             text=(
                 f"[b]{self.t('reprint_question')}[/b]\n\n"
-                f"[color=ffcc00]{escape_markup(resumen)}[/color]\n\n"
+                #f"[color=ffcc00]{escape_markup(resumen)}[/color]\n\n"
                 f"{self.t('reprint_notice')}"
             ),
             markup=True,
@@ -1497,17 +1505,26 @@ class EtiquetasApp(App):
         return translate(key, getattr(self, "language", "es"), **kwargs)
 
     def build(self):
-        self.language = "es"
-        try:
-            db_path = os.path.join(self.user_data_dir, "materiales.db")
-            if os.path.isfile(db_path):
-                con = sqlite3.connect(db_path)
-                row = con.execute("SELECT valor FROM meta WHERE clave='language'").fetchone()
-                con.close()
-                if row and row[0] in ("es", "en"):
-                    self.language = row[0]
-        except (sqlite3.Error, OSError):
-            pass
+        # Idioma de la pantalla de carga
+        if getattr(config, "IDIOMA_ACTIVO", True):
+            # Botón activo: se usa el idioma que quedó guardado en la base
+            self.language = "es"
+            try:
+                db_path = os.path.join(self.user_data_dir, "materiales.db")
+                if os.path.isfile(db_path):
+                    con = sqlite3.connect(db_path)
+                    row = con.execute(
+                        "SELECT valor FROM meta WHERE clave='language'"
+                    ).fetchone()
+                    con.close()
+                    if row and row[0] in ("es", "en"):
+                        self.language = row[0]
+            except (sqlite3.Error, OSError):
+                pass
+        else:
+            # Botón apagado: idioma fijo de config.py
+            self.language = getattr(config, "IDIOMA_FIJO", "es")
+
         pedir_permisos()
         self.pantalla_carga = PantallaCarga()
         Clock.schedule_once(self._preparar_inicio, 0.2)
