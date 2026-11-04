@@ -19,3 +19,6 @@ FORMATO_FECHA = "%d/%m/%Y %H:%M"
 # no sale completa, sube estos valores (por ejemplo 1.5 y 3.0).
 PAUSA_ENTRE_ETIQUETAS = 1.0
 PAUSA_FINAL = 2.0
+#Idioma
+IDIOMA_ACTIVO = False
+IDIOMA_FIJO = "es"
