@@ -40,9 +40,8 @@ MODO_BIN = "BIN"
 MODO_SL = "SLOC"
 
 
-# --------------------------------------------------------- CSV cifrados
+# CSV cifrados
 # Formato: magic(8) + salt(16) + nonce(12) + ciphertext/tag(AES-GCM).
-# La contraseña NO se guarda en el código ni dentro del APK.
 _MAGIC_CIFRADO = b"IHCAESG1"
 _SALT_LEN = 16
 _NONCE_LEN = 12
@@ -55,7 +54,7 @@ def _derivar_clave(password, salt):
     return kdf.derive(password.encode("utf-8"))
 
 def descifrar_csv(ruta, password):
-    """Descifra un .enc en memoria; nunca crea un CSV temporal en texto claro."""
+    """Descifra un .enc en memoria"""
     with open(ruta, "rb") as f:
         blob = f.read()
     cabecera = len(_MAGIC_CIFRADO) + _SALT_LEN + _NONCE_LEN
@@ -84,8 +83,8 @@ def _hash_assets_cifrados():
     return h.hexdigest()
 
 
-# ----------------------------------------------------------------- Base de datos
-# Columnas del materiales.csv que marcan un PRODUCTO TERMINADO y valores que cuentan como "si"
+# -- Base de datos
+
 COLUMNAS_TERMINADO = (
     "producto_terminado", "producto terminado", "terminado", "pt", "fg",
     "finished_good", "finished good", "tipo", "tipo_material", "tipo material",
@@ -106,13 +105,13 @@ class DB:
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS meta (clave TEXT PRIMARY KEY, valor TEXT)"
         )
-        # Materiales dados de alta desde la app (no se borran al recargar el CSV)
+        # Materiales dados de alta desde la app 
         self.con.execute(
             "CREATE TABLE IF NOT EXISTS materiales_extra ("
             "material TEXT PRIMARY KEY, descripcion TEXT, unidad TEXT, "
             "terminado INTEGER DEFAULT 0)"
         )
-        # BINs validos (bines.csv)
+        # BINs validos 
         self.con.execute("CREATE TABLE IF NOT EXISTS bines (bin TEXT PRIMARY KEY)")
         # Migracion: bases creadas antes de existir la columna 'terminado'
         for tabla in ("materiales", "materiales_extra"):
@@ -159,7 +158,7 @@ class DB:
         return n
 
     def importar_csv(self, ruta):
-        """CSV con encabezado: material,unidad[,descripcion]; acepta ruta o bytes."""
+        """CSV con encabezado: material,unidad[,descripcion]."""
         if isinstance(ruta, (bytes, bytearray, memoryview)):
             crudo = bytes(ruta)
         else:
@@ -172,7 +171,7 @@ class DB:
                 break
             except UnicodeDecodeError:
                 continue
-        # Excel en espanol suele separar con ";" en vez de ","
+        # Excel en español suele separar con ";" en vez de ","
         primera = texto.splitlines()[0] if texto.strip() else ""
         delim = max((",", ";", "\t"), key=primera.count)
 
@@ -281,7 +280,7 @@ class DB:
         ).fetchone() is not None
 
 
-# ----------------------------------------------------------------------- ZPL
+# ZPL
 def limpiar(s):
     s = str(s)
     for c in ("^", "~", "\t", "\r", "\n"):
@@ -413,7 +412,7 @@ def zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha):
             else 32
         )
 
-        # Cota conservadora de ancho, incluyendo zonas de silencio.
+        # Bound conservador de ancho, incluyendo zonas de silencio.
         modulo = min(3, ancho // (11 * (len(valor) + 3) + 22))
         if modulo < 1:
             raise ValueError(
@@ -459,7 +458,7 @@ def generar_zpl(modo, material, desc, qty, unidad, bin_):
         zpl_etiqueta_qr(modo, m, d, q, u, b, fecha, copias_qr)
         + zpl_etiqueta_barcode(modo, m, d, q, u, b, fecha)
     )
-# ------------------------------------------------------------------ Android
+# Android
 def pedir_permisos():
     if platform != "android":
         return
@@ -570,8 +569,7 @@ def conectar_impresora(mac):
 
     device = adapter.getRemoteDevice(mac)
 
-    # IMPORTANTE:
-    # No debe estar haciendo discovery mientras conectamos.
+    
     adapter.cancelDiscovery()
 
     uuid = UUID.fromString(SPP_UUID)
@@ -623,8 +621,7 @@ def enviar_bluetooth(mac, zpl):
 
         bluetooth_output.flush()
 
-        # Pequeña pausa para darle tiempo
-        # a la impresora de procesar los datos.
+        # Pequeña pausa para darle tiempo a la impresora de procesar los datos.
         time.sleep(0.1)
 
         return True
@@ -686,7 +683,7 @@ def desconectar_impresora():
     bluetooth_socket = None
     bluetooth_mac_actual = None
 
-# ------------------------------------------------------------ Sonido y unidades
+# Sonido y unidades
 def sonido_error():
     """Beep de error (material o BIN incorrecto). En Android usa ToneGenerator.
     El volumen es el de MULTIMEDIA del equipo. Se apaga con SONIDO_ERROR = False."""
@@ -721,7 +718,7 @@ NOMBRES_UNIDAD = {
 }
 
 
-# ------------------------------------------------------------------------ UI
+# UI
 # Paleta: blanco, amarillo y negro
 NEGRO = (0.055, 0.055, 0.055, 1)
 BLANCO = (1, 1, 1, 1)
@@ -1012,7 +1009,7 @@ class Raiz(BoxLayout):
         modo = db.get_meta("modo", config.MODO_INICIAL)
         self.modo = modo if modo in (MODO_BIN, MODO_SL) else MODO_BIN
 
-        # --- impresora y modo
+        # impresora y modo
         self.spin = Selector(text="Selecciona impresora")
         b_act = Boton("Actualizar", fondo=NEGRO, tinta=AMARILLO, font_size="13sp",
                       size_hint_x=0.3)
@@ -1027,12 +1024,12 @@ class Raiz(BoxLayout):
                               size_hint_y=None, height=dp(46))
         self.btn_modo.bind(on_release=lambda *_: self.cambiar_modo())
 
-        # --- selector de idioma (persiste en SQLite)
+        # selector de idioma (persiste en SQLite)
         self.btn_lang = Boton("", fondo=NEGRO, tinta=AMARILLO,
                               size_hint_y=None, height=dp(42))
         self.btn_lang.bind(on_release=lambda *_: self.cambiar_idioma())
         
-        # --- captura
+        # captura
         self.f_mat = Campo("Material (escanear)")
         self.info = Label(text="", size_hint_y=None, height=dp(34), color=NEGRO, bold=True,
                           font_size="16sp", halign="left", valign="middle",
@@ -1046,10 +1043,10 @@ class Raiz(BoxLayout):
         for w in (self.f_uni, self.f_desc, self.btn_alta):
             self.panel_alta.add_widget(w)
         self.f_bin = Campo("Bin (escanear)")
-        self.f_qty = Campo("QTY", input_filter="float")
+        self.f_qty = Campo("QTY", input_filter="int")
         
 
-        # --- imprimir / reimprimir
+        # imprimir / reimprimir
         self.btn_print = Boton("IMPRIMIR", font_size="22sp", size_hint_y=None, height=dp(62))
         self.btn_reimp = Boton("REIMPRIMIR ÚLTIMO", fondo=NEGRO, tinta=AMARILLO,
                                font_size="16sp", size_hint_y=None, height=dp(50))
@@ -1064,7 +1061,7 @@ class Raiz(BoxLayout):
         self.btn_print.bind(on_release=lambda *_: self.imprimir())
         self.btn_reimp.bind(on_release=lambda *_: self.reimprimir())
 
-        # --- armado de la pantalla: encabezado, contenido con scroll, barra de estado
+        # armado de la pantalla: encabezado, contenido con scroll, barra de estado
         contenido = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None,
                               padding=[dp(12), dp(10), dp(12), dp(10)])
         contenido.bind(minimum_height=contenido.setter("height"))
@@ -1122,7 +1119,7 @@ class Raiz(BoxLayout):
     def msg(self, texto):
         self.estado.text = texto
 
-    # --- modo BIN / STORAGE LOCATION
+    # modo BIN / STORAGE LOCATION
     def aplicar_modo(self):
         es_bin = self.modo == MODO_BIN
         self.btn_modo.text = self.t("mode", mode=self.modo)
@@ -1138,7 +1135,7 @@ class Raiz(BoxLayout):
         self.msg(self.t("mode_changed", mode=self.modo))
         self.f_mat.focus = True
 
-    # --- control de estado: sin material valido no se captura ni se imprime
+    # control de estado: sin material valido no se captura ni se imprime
     def aplicar_estado(self):
         ok = self.material_ok
         self.f_qty.disabled = not ok
@@ -1163,7 +1160,7 @@ class Raiz(BoxLayout):
         self.material_ok = True
         self.aplicar_estado()
 
-    # --- impresoras
+    # impresoras
     def cargar_impresoras(self):
         self.impresoras = impresoras_emparejadas()
         self.spin.values = list(self.impresoras)
@@ -1172,7 +1169,7 @@ class Raiz(BoxLayout):
             self.spin.text = (zebra or list(self.impresoras))[0]
         self.msg(self.t("paired", count=len(self.impresoras)))
 
-    # --- contrasena (para dar de alta materiales)
+    # contraseña (para dar de alta materiales)
     def pedir_password(self, accion):
         caja = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(8))
         campo = Campo(self.t("password"), password=True, mayusculas=False)
@@ -1204,7 +1201,7 @@ class Raiz(BoxLayout):
         pop.open()
         Clock.schedule_once(lambda dt: setattr(campo, "focus", True), 0.1)
 
-    # --- flujo de captura
+    # flujo de captura
     def al_material(self, *_):
         mat = self.f_mat.text.strip()
         if not mat:
@@ -1319,7 +1316,7 @@ class Raiz(BoxLayout):
 
 
 
-    # --- validacion de BIN contra bines.csv
+    # validacion de BIN contra bines.csv
     def bin_valido(self, b):
         if not self.db.hay_bines():
             self.msg(self.t("bin_db_empty"))
@@ -1362,7 +1359,7 @@ class Raiz(BoxLayout):
             sonido_error()
             return self.msg(self.t("material_missing"))
         try:
-            if float(qty) <= 0:
+            if int(qty) <= 0:
                 raise ValueError
         except ValueError:
             return self.msg(self.t("qty_invalid"))
@@ -1396,7 +1393,7 @@ class Raiz(BoxLayout):
             self.f_mat.focus = True
 
 
-    # --- reimprimir la ultima captura
+    # reimprimir la ultima captura
     def reimprimir(self):
         zpl = self.db.get_meta("ultimo_zpl")
         if not zpl:
